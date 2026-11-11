@@ -31,6 +31,7 @@ class ReviewFinding(BaseModel):
     decision_id: UUID
     category: FindingCategory
     severity: FindingSeverity
+    claim: str = Field(max_length=300)
     issue: str = Field(min_length=1, max_length=500)
     evidence: str = Field(min_length=1, max_length=700)
     lesson: str = Field(min_length=1, max_length=500)
@@ -66,11 +67,12 @@ REVIEW_SCHEMA = {
                 "decision_id": {"type": "string", "format": "uuid"},
                 "category": {"type": "string", "enum": [item.value for item in FindingCategory]},
                 "severity": {"type": "string", "enum": [item.value for item in FindingSeverity]},
+                "claim": {"type": "string"},
                 "issue": {"type": "string"},
                 "evidence": {"type": "string"},
                 "lesson": {"type": "string"},
             },
-            "required": ["decision_id", "category", "severity", "issue", "evidence", "lesson"],
+            "required": ["decision_id", "category", "severity", "claim", "issue", "evidence", "lesson"],
             "additionalProperties": False,
         }},
         "data_gaps": {"type": "array", "items": {"type": "string"}},

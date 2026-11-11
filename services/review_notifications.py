@@ -33,6 +33,10 @@ def format_review_notification(row: DecisionReviewORM) -> str:
         lines.extend([
             f"• <b>{_safe(finding['severity'])} / {_safe(finding['category'])}</b> "
             f"| decyzja {_safe(finding['decision_id'][:8])}: {_safe(finding['issue'], 350)}",
+        ])
+        if finding.get("claim"):
+            lines.append(f"  <b>Teza:</b> {_safe(finding['claim'], 300)}")
+        lines.extend([
             f"  <b>Dowód:</b> {_safe(finding['evidence'], 500)}",
             f"  <b>Wniosek:</b> {_safe(finding['lesson'], 350)}",
         ])

@@ -96,6 +96,7 @@ def review_payload(decision_id):
         "assessment": "ISSUES_FOUND", "summary": "Jeden błąd opisu.",
         "findings": [{
             "decision_id": str(decision_id), "category": "DATA_CLAIM", "severity": "MEDIUM",
+            "claim": "Świeca 1m potwierdziła wzrost <test>",
             "issue": "Niepoparta teza <trend>", "evidence": "Ostatnia zamknięta świeca 1m: 100",
             "lesson": "Odnosić opis do świec zamkniętych przed decyzją",
         }],
@@ -107,14 +108,25 @@ def test_reviewer_uses_structured_output_and_rejects_unknown_decision():
     decision_id = uuid4()
     responses = FakeResponses(review_payload(decision_id))
     reviewer = DecisionReviewer(SimpleNamespace(responses=responses), "test-model")
-    context = {"decisions": [{"id": str(decision_id)}]}
+    context = {"decisions": [{"id": str(decision_id), "text": "Świeca 1m potwierdziła wzrost <test>"}]}
     result = reviewer.analyze(context)
     assert result.findings[0].decision_id == decision_id
     assert responses.requests[0]["text"]["format"]["strict"] is True
     assert "tools" not in responses.requests[0]
     assert reviewer.last_model == "review-model"
     with pytest.raises(RuntimeError, match="outside the audited window"):
-        reviewer.analyze({"decisions": [{"id": str(uuid4())}]})
+        reviewer.analyze({"decisions": [{"id": str(uuid4()), "text": "Inna decyzja"}]})
+
+
+def test_reviewer_drops_unverifiable_live_quote_claim():
+    decision_id = uuid4()
+    payload = review_payload(decision_id)
+    payload["findings"][0]["claim"] = "kurs poniżej środkowej wstęgi"
+    result = DecisionReviewer(SimpleNamespace(responses=FakeResponses(payload)), "test-model").analyze({
+        "decisions": [{"id": str(decision_id), "text": "Kontekst 1h: kurs poniżej środkowej wstęgi"}],
+    })
+    assert result.assessment.value == "INSUFFICIENT_DATA"
+    assert result.findings == []
 
 
 def test_review_is_saved_once_and_telegram_retries_without_duplicate(isolated_sessions, monkeypatch):
