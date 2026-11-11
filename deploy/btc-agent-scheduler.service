@@ -1,0 +1,14 @@
+[Unit]
+Description=BTC/USD candle collector, indicators and market analyst
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/damian/projects/btc-agent
+ExecStart=/home/damian/projects/btc-agent/.venv/bin/python -u scheduler.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
