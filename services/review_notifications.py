@@ -23,12 +23,25 @@ def _safe(value: object, limit: int = 700) -> str:
 
 def format_review_notification(row: DecisionReviewORM) -> str:
     lines = [
-        f"<b>Audyt decyzji BTC/USD</b> | {row.window_start:%Y-%m-%d %H:%M}–{row.window_end:%H:%M} UTC",
+        f"<b>Audyt działań PAPER BTC/USD</b> | {row.window_start:%Y-%m-%d %H:%M}–{row.window_end:%H:%M} UTC",
         f"<b>Ocena:</b> {_safe(row.assessment)} | decyzje: {len(row.decision_ids)}",
         f"<b>Podsumowanie:</b> {_safe(row.summary, 900)}",
         "",
-        f"<b>Wskazane błędy ({len(row.findings)}):</b>",
+        f"<b>Analiza działań ({len(row.action_reviews or [])}):</b>",
     ]
+    for action in row.action_reviews or []:
+        short_id = action["action_id"].split(":")[1][:8]
+        lines.extend([
+            f"• <b>{_safe(action['action_type'])} | {_safe(action['verdict'])}</b> | {_safe(short_id)}",
+            f"  <b>Ocena:</b> {_safe(action['reason'], 330)}",
+            f"  <b>Dowód:</b> {_safe(action['evidence'], 330)}",
+        ])
+        if action.get("lesson"):
+            lines.append(f"  <b>Wniosek:</b> {_safe(action['lesson'], 200)}")
+    lines.extend([
+        "",
+        f"<b>Wskazane błędy ({len(row.findings)}):</b>",
+    ])
     for finding in row.findings:
         lines.extend([
             f"• <b>{_safe(finding['severity'])} / {_safe(finding['category'])}</b> "

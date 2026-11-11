@@ -62,7 +62,8 @@ def run_market_analysis(force: bool = False, preview: bool = False) -> AgentDeci
 
     with SessionLocal.begin() as session:
         saved = AgentMemoryRepository(session).save(
-            instrument, candle_timestamp, analyst.last_model, decision, active
+            instrument, candle_timestamp, analyst.last_model, decision, active,
+            analysis_trace={"paper_context": paper_context, "tool_calls": analyst.tool_trace},
         )
         if saved:
             decision_id = session.scalar(select(AgentDecisionORM.id).where(

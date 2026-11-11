@@ -15,7 +15,7 @@ from database.connection import SessionLocal
 from database.models.agent_decision import AgentDecisionORM
 from database.models.candle import CandleORM
 from database.models.decision_review import DecisionReviewORM
-from database.models.paper import PaperPositionORM
+from database.models.paper import PaperPositionEventORM, PaperPositionORM
 from models.decision_review import DecisionReview, ReviewAssessment
 from models.market import Instrument, Timeframe
 from repositories.candle_repository import CandleRepository
@@ -54,12 +54,14 @@ def _candle_summary(row: CandleORM) -> dict:
 
 
 def _position_summary(row: PaperPositionORM, window_end: datetime) -> dict:
-    closed_in_window = row.close_at is not None and row.close_at <= window_end
+    closed_in_window = row.close_at is not None and row.close_at < window_end
     return {
         "id": str(row.id),
         "agent_decision_id": str(row.agent_decision_id) if row.agent_decision_id else None,
         "side": row.side, "entry_at": row.entry_at.isoformat(),
         "entry_price": str(row.entry_price), "quantity_btc": str(row.quantity_btc),
+        "entry_reason": row.entry_reason[:800],
+        "entry_notional": str(row.entry_notional),
         "stop_loss": str(row.stop_loss) if row.stop_loss is not None else None,
         "take_profit": str(row.take_profit) if row.take_profit is not None else None,
         "initial_costs": str(row.initial_costs),
@@ -67,8 +69,12 @@ def _position_summary(row: PaperPositionORM, window_end: datetime) -> dict:
         "status_at_window_end": row.status if closed_in_window else "OPEN_AT_WINDOW_END",
         "close_at": row.close_at.isoformat() if closed_in_window else None,
         "close_reason": row.close_reason if closed_in_window else None,
+        "close_reason_text": row.close_reason_text if closed_in_window else None,
+        "close_source": row.close_source if closed_in_window else None,
         "close_price": str(row.close_price) if closed_in_window else None,
+        "realized_gross_pnl": str(row.realized_gross_pnl) if closed_in_window else None,
         "realized_net_pnl": str(row.realized_net_pnl) if closed_in_window else None,
+        "fee_total": str(row.fee_total) if closed_in_window else None,
     }
 
 
@@ -87,16 +93,15 @@ def build_review_context(session: Session, window_end: datetime) -> dict:
         "window_end": window_end.isoformat(),
         "data_policy": (
             "Candles and indicators are reconstructed from stored closed candles. "
-            "known_at_decision excludes still-open candles; price ticker/tool transcripts "
-            "were not stored and cannot be verified exactly. Candle and position outcomes "
+            "known_at_decision excludes still-open candles. Historical decisions lack tool "
+            "traces; new decisions store tool-call metadata and observed ticker quotes. "
+            "Reconstructed market data may not exactly match what the analyst fetched. "
+            "Candle and position outcomes "
             "stop at window_end; PAPER execution records reflect the currently stored result."
         ),
-        "decisions": [], "positions": [],
+        "decisions": [], "positions": [], "paper_events": [], "actions": [],
     }
-    if not decisions:
-        return context
-
-    earliest = decisions[0].created_at
+    earliest = decisions[0].created_at if decisions else window_start
     candles_by_timeframe = {}
     for timeframe in (Timeframe.ONE_MINUTE, Timeframe.FIFTEEN_MINUTES, Timeframe.ONE_HOUR):
         step = timedelta(minutes=timeframe.minutes)
@@ -130,6 +135,7 @@ def build_review_context(session: Session, window_end: datetime) -> dict:
             "position_actions": decision.position_actions or [],
             "paper_status": decision.paper_status,
             "paper_result": decision.paper_result,
+            "analysis_trace": decision.analysis_trace,
             "known_at_decision": known,
             "observed_after_decision": {
                 "next_closed_15m": _candle_summary(after_15m) if after_15m else None,
@@ -138,17 +144,78 @@ def build_review_context(session: Session, window_end: datetime) -> dict:
         })
 
     decision_ids = [row.id for row in decisions]
-    action_ids = {UUID(action["position_id"]) for row in decisions
-                  for action in row.position_actions or [] if action.get("position_id")}
+    action_position_ids = {UUID(action["position_id"]) for row in decisions
+                           for action in row.position_actions or [] if action.get("position_id")}
     conditions = [PaperPositionORM.agent_decision_id.in_(decision_ids),
                   and_(PaperPositionORM.close_at >= window_start,
-                       PaperPositionORM.close_at <= window_end)]
-    if action_ids:
-        conditions.append(PaperPositionORM.id.in_(action_ids))
+                       PaperPositionORM.close_at < window_end)]
+    if action_position_ids:
+        conditions.append(PaperPositionORM.id.in_(action_position_ids))
     positions = session.scalars(select(PaperPositionORM).where(
         or_(*conditions), PaperPositionORM.entry_at < window_end,
     ).order_by(PaperPositionORM.entry_at)).all()
+    position_ids = [row.id for row in positions]
+    events = list(session.scalars(select(PaperPositionEventORM).where(
+        or_(PaperPositionEventORM.position_id.in_(position_ids),
+            PaperPositionEventORM.decision_id.in_(decision_ids)),
+        PaperPositionEventORM.event_time < window_end,
+    ).order_by(PaperPositionEventORM.event_time)))
+    event_summaries = [{
+        "type": event.type,
+        "event_time": event.event_time.isoformat(),
+        "position_id": str(event.position_id) if event.position_id else None,
+        "decision_id": str(event.decision_id) if event.decision_id else None,
+        "payload": event.payload,
+    } for event in events]
+    context["paper_events"] = event_summaries
     context["positions"] = [_position_summary(row, window_end) for row in positions]
+    positions_by_decision = {str(row.agent_decision_id): row for row in positions if row.agent_decision_id}
+    for decision in decisions:
+        decision_id = str(decision.id)
+        results = (decision.paper_result or {}).get("results", [])
+        if decision.open_proposal:
+            opened = positions_by_decision.get(decision_id)
+            context["actions"].append({
+                "id": f"decision:{decision_id}:open",
+                "type": "OPEN_LONG" if decision.open_proposal["side"] == "LONG" else "OPEN_SHORT",
+                "at": decision.created_at.isoformat(), "decision_id": decision_id,
+                "position_id": str(opened.id) if opened else None,
+                "execution_result": results[-1] if results else decision.paper_result,
+            })
+        for item in decision.position_actions or []:
+            position_id = item["position_id"]
+            result = next((result for result in results if result.get("position_id") == position_id), None)
+            context["actions"].append({
+                "id": f"decision:{decision_id}:{item['action'].lower()}:{position_id}",
+                "type": item["action"], "at": decision.created_at.isoformat(),
+                "decision_id": decision_id, "position_id": position_id,
+                "reason": item.get("reason"),
+                "execution_result": result or ({"status": "HELD"} if item["action"] == "HOLD" else decision.paper_result),
+            })
+    for position in positions:
+        if (position.close_at is None or not window_start <= position.close_at < window_end
+            or position.close_reason == "AGENT"):
+            continue
+        close_event = next((event for event in reversed(event_summaries)
+                            if event["position_id"] == str(position.id)
+                            and event["type"] == "CLOSED"), None)
+        trigger_candle = None
+        if close_event and close_event["payload"].get("theoretical_touch_at"):
+            touch_at = datetime.fromisoformat(close_event["payload"]["theoretical_touch_at"])
+            trigger_candle = session.scalar(select(CandleORM).where(
+                CandleORM.symbol == Instrument.BTC_USD,
+                CandleORM.timeframe == Timeframe.ONE_MINUTE,
+                CandleORM.timestamp == touch_at - timedelta(minutes=1),
+            ))
+        context["actions"].append({
+            "id": f"position:{position.id}:auto_close", "type": "AUTO_CLOSE",
+            "at": position.close_at.isoformat(),
+            "decision_id": str(position.agent_decision_id) if position.agent_decision_id else None,
+            "position_id": str(position.id),
+            "execution_result": close_event,
+            "trigger_candle": _candle_summary(trigger_candle) if trigger_candle else None,
+        })
+    context["actions"].sort(key=lambda item: (item["at"], item["id"]))
     return context
 
 
@@ -160,6 +227,7 @@ def _result(row: DecisionReviewORM, status: str) -> dict:
         "reviewer_model": row.reviewer_model,
         "decision_count": len(row.decision_ids),
         "assessment": row.assessment, "summary": row.summary,
+        "action_reviews": row.action_reviews or [],
         "findings": row.findings, "data_gaps": row.data_gaps,
         "notification_status": row.notification_status,
     }
@@ -187,7 +255,7 @@ def run_decision_review(
                 return _result(existing, "EXISTS")
         context = build_review_context(session, window_end)
 
-    if context["decisions"]:
+    if context["actions"]:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key and client is None:
             raise RuntimeError("Set OPENAI_API_KEY to run the decision reviewer")
@@ -202,15 +270,17 @@ def run_decision_review(
         reviewer_model = reviewer.last_model
     else:
         review = DecisionReview(
-            assessment=ReviewAssessment.NO_DECISIONS,
-            summary="Brak zapisanych decyzji agenta w zakończonym oknie dwóch godzin.",
-            findings=[], data_gaps=[],
+            assessment=ReviewAssessment.NO_ACTIONS if context["decisions"] else ReviewAssessment.NO_DECISIONS,
+            summary=("Brak propozycji wejścia, akcji pozycji i automatycznych zamknięć w oknie."
+                     if context["decisions"] else "Brak zapisanych decyzji i działań PAPER w oknie."),
+            action_reviews=[], findings=[], data_gaps=[],
         )
         reviewer_model = "none"
 
     if preview:
         return {"status": "PREVIEW", "window_end": window_end.isoformat(),
                 "decision_count": len(context["decisions"]),
+                "action_count": len(context["actions"]),
                 "reviewer_model": reviewer_model,
                 "review": review.model_dump(mode="json")}
 
@@ -221,6 +291,7 @@ def run_decision_review(
             created_at=now, reviewer_model=reviewer_model,
             instructions_hash=INSTRUCTIONS_HASH,
             assessment=review.assessment.value, summary=review.summary,
+            action_reviews=[item.model_dump(mode="json") for item in review.action_reviews],
             findings=[finding.model_dump(mode="json") for finding in review.findings],
             data_gaps=review.data_gaps,
             decision_ids=[item["id"] for item in context["decisions"]],

@@ -71,7 +71,8 @@ class MarketAgentTests(unittest.TestCase):
     def test_agent_passes_tool_result_back_to_model(self):
         responses = FakeResponses()
         client = SimpleNamespace(responses=responses)
-        report = MarketAnalyst(client, FakeTools(), "test-model").analyze()
+        analyst = MarketAnalyst(client, FakeTools(), "test-model")
+        report = analyst.analyze()
         self.assertEqual(report.decision, Decision.WAIT)
         self.assertEqual(report.text, "Brak potwierdzenia.")
         self.assertEqual(responses.requests[0]["text"]["format"]["schema"], AGENT_DECISION_SCHEMA)
@@ -84,6 +85,8 @@ class MarketAgentTests(unittest.TestCase):
         self.assertEqual({tool["name"] for tool in TOOL_DEFINITIONS}, {
             "get_price", "get_indicators", "get_candles", "get_paper_account", "get_open_positions"
         })
+        self.assertEqual(analyst.tool_trace[0]["name"], "get_price")
+        self.assertEqual(analyst.tool_trace[0]["result"]["price"], "74000")
 
     def test_ticker_and_parameter_validation(self):
         response = SimpleNamespace(

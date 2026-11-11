@@ -12,6 +12,7 @@ from database.connection import engine
 from database.models.agent_decision import AgentDecisionORM
 from database.models.candle import CandleORM
 from database.models.decision_review import DecisionReviewORM
+from database.models.paper import PaperAccountORM, PaperFeeProfileORM, PaperPositionEventORM, PaperPositionORM
 from models.market import Instrument, Timeframe
 import services.decision_review as decision_review
 import services.review_notifications as review_notifications
@@ -78,6 +79,60 @@ def test_window_boundaries_and_context_exclude_unclosed_candles(isolated_session
     assert [c["close"] for c in item["known_at_decision"]["15m"]["recent_closed_candles"]] == ["98.0000000000"]
     assert item["observed_after_decision"]["next_closed_15m"]["close"] == "102.0000000000"
     assert item["known_at_decision"]["1m"]["indicators_at_last_close"]["ma50"] is None
+    assert context["actions"][0]["type"] == "OPEN_LONG"
+    assert context["actions"][0]["execution_result"]["status"] == "REJECTED"
+
+
+def test_context_links_entry_auto_close_and_trigger_candle(isolated_sessions):
+    with isolated_sessions.begin() as session:
+        at = END - timedelta(hours=1, minutes=30)
+        row = decision(session, at)
+        row.paper_result = {"status": "DONE", "results": [{"status": "ACCEPTED", "position_id": None}]}
+        account_id, profile_id, position_id = uuid4(), uuid4(), uuid4()
+        session.add(PaperAccountORM(
+                id=account_id, name=f"review-{uuid4().hex[:20]}", currency="USD",
+            initial_balance=D("1000"), cash_balance=D("1000"), status="ACTIVE",
+            version=1, created_at=at, updated_at=at,
+        ))
+        session.flush()
+        session.add(PaperFeeProfileORM(
+            id=profile_id, account_id=account_id, version=1, market_type="SPOT_MARGIN",
+            status="ESTIMATED", source="test", trade_entry_fee_rate=D("0.001"),
+            trade_exit_fee_rate=D("0.001"), margin_opening_fee_rate=D("0"),
+            rollover_rate_per_4h=D("0"), slippage_bps=D("0"), spread_bps=D("4"),
+            created_at=at,
+        ))
+        session.flush()
+        close_at = at + timedelta(minutes=3)
+        session.add(PaperPositionORM(
+            id=position_id, account_id=account_id, instrument=Instrument.BTC_USD.value,
+            market_type="SPOT_MARGIN", side="LONG", status="CLOSED", entry_price=D("100"),
+            entry_at=at + timedelta(seconds=1), entry_candle_timestamp=None,
+            entry_source="test", execution_key=f"test:{uuid4()}", quantity_btc=D("1"),
+            entry_notional=D("100"), leverage=D("1"), reserved_margin=D("100"),
+            stop_loss=D("99"), take_profit=D("105"), entry_reason="impuls",
+            agent_decision_id=row.id, scenario_key=None, fee_profile_id=profile_id,
+            fee_snapshot={}, initial_costs=D("0.1"), accrued_holding_costs=D("0"),
+            close_price=D("105"), close_at=close_at,
+            close_source="1m_ohlc_barrier_assumption", close_reason="TAKE_PROFIT",
+            close_reason_text="", realized_gross_pnl=D("5"), realized_net_pnl=D("4.8"),
+            fee_total=D("0.2"), unpaid_loss=D("0"),
+            last_evaluated_candle_timestamp=None, last_holding_period=0,
+        ))
+        session.flush()
+        session.add(PaperPositionEventORM(
+            id=uuid4(), account_id=account_id, position_id=position_id,
+            decision_id=None, type="CLOSED", event_time=close_at,
+            payload={"reason": "TAKE_PROFIT", "theoretical_touch_at": close_at.isoformat()},
+            dedupe_key=f"test-close:{position_id}",
+        ))
+        candle(session, Timeframe.ONE_MINUTE, close_at - timedelta(minutes=1), "105")
+        session.flush()
+        context = build_review_context(session, END)
+    assert [action["type"] for action in context["actions"]] == ["OPEN_LONG", "AUTO_CLOSE"]
+    assert context["actions"][0]["position_id"] == str(position_id)
+    assert context["actions"][1]["trigger_candle"]["close"] == "105.0000000000"
+    assert context["positions"][0]["realized_net_pnl"] == "4.800000000000"
 
 
 class FakeResponses:
@@ -94,8 +149,14 @@ class FakeResponses:
 def review_payload(decision_id):
     return {
         "assessment": "ISSUES_FOUND", "summary": "Jeden błąd opisu.",
+        "action_reviews": [{
+            "action_id": f"decision:{decision_id}:open", "action_type": "OPEN_LONG",
+            "verdict": "ERROR", "reason": "Niepoparta teza", "evidence": "Świeca 1m: 100",
+            "lesson": "Sprawdzić dane",
+        }],
         "findings": [{
-            "decision_id": str(decision_id), "category": "DATA_CLAIM", "severity": "MEDIUM",
+            "decision_id": str(decision_id), "action_id": f"decision:{decision_id}:open",
+            "category": "DATA_CLAIM", "severity": "MEDIUM",
             "claim": "Świeca 1m potwierdziła wzrost <test>",
             "issue": "Niepoparta teza <trend>", "evidence": "Ostatnia zamknięta świeca 1m: 100",
             "lesson": "Odnosić opis do świec zamkniętych przed decyzją",
@@ -108,14 +169,17 @@ def test_reviewer_uses_structured_output_and_rejects_unknown_decision():
     decision_id = uuid4()
     responses = FakeResponses(review_payload(decision_id))
     reviewer = DecisionReviewer(SimpleNamespace(responses=responses), "test-model")
-    context = {"decisions": [{"id": str(decision_id), "text": "Świeca 1m potwierdziła wzrost <test>"}]}
+    context = {"decisions": [{"id": str(decision_id), "text": "Świeca 1m potwierdziła wzrost <test>"}],
+               "actions": [{"id": f"decision:{decision_id}:open", "type": "OPEN_LONG", "decision_id": str(decision_id)}]}
     result = reviewer.analyze(context)
     assert result.findings[0].decision_id == decision_id
     assert responses.requests[0]["text"]["format"]["strict"] is True
     assert "tools" not in responses.requests[0]
     assert reviewer.last_model == "review-model"
+    other_id = uuid4()
     with pytest.raises(RuntimeError, match="outside the audited window"):
-        reviewer.analyze({"decisions": [{"id": str(uuid4()), "text": "Inna decyzja"}]})
+        reviewer.analyze({"decisions": [{"id": str(other_id), "text": "Inna decyzja"}],
+                          "actions": [{"id": f"decision:{other_id}:open", "type": "OPEN_LONG", "decision_id": str(other_id)}]})
 
 
 def test_reviewer_drops_unverifiable_live_quote_claim():
@@ -124,9 +188,30 @@ def test_reviewer_drops_unverifiable_live_quote_claim():
     payload["findings"][0]["claim"] = "kurs poniżej środkowej wstęgi"
     result = DecisionReviewer(SimpleNamespace(responses=FakeResponses(payload)), "test-model").analyze({
         "decisions": [{"id": str(decision_id), "text": "Kontekst 1h: kurs poniżej środkowej wstęgi"}],
+        "actions": [{"id": f"decision:{decision_id}:open", "type": "OPEN_LONG", "decision_id": str(decision_id)}],
     })
     assert result.assessment.value == "INSUFFICIENT_DATA"
     assert result.findings == []
+    assert result.action_reviews[0].verdict.value == "INSUFFICIENT_DATA"
+
+
+def test_reviewer_marks_close_without_position_insufficient():
+    decision_id, position_id = uuid4(), uuid4()
+    action_id = f"decision:{decision_id}:close:{position_id}"
+    payload = {
+        "assessment": "NO_ISSUES", "summary": "Zamknięcie uzasadnione.",
+        "action_reviews": [{"action_id": action_id, "action_type": "CLOSE",
+                            "verdict": "JUSTIFIED", "reason": "Sygnał osłabł",
+                            "evidence": "Świeca 1m", "lesson": "Sprawdź ryzyko"}],
+        "findings": [], "data_gaps": [],
+    }
+    context = {"decisions": [{"id": str(decision_id), "text": "Zamykam"}],
+               "positions": [],
+               "actions": [{"id": action_id, "type": "CLOSE", "decision_id": str(decision_id),
+                            "position_id": str(position_id)}]}
+    result = DecisionReviewer(SimpleNamespace(responses=FakeResponses(payload)), "test-model").analyze(context)
+    assert result.assessment.value == "INSUFFICIENT_DATA"
+    assert result.action_reviews[0].verdict.value == "INSUFFICIENT_DATA"
 
 
 def test_review_is_saved_once_and_telegram_retries_without_duplicate(isolated_sessions, monkeypatch):

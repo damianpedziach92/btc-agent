@@ -13,7 +13,7 @@ class DecisionReviewORM(Base):
     __table_args__ = (
         UniqueConstraint("instrument", "window_end", name="uq_decision_reviews_instrument_window"),
         CheckConstraint(
-            "assessment IN ('NO_ISSUES', 'ISSUES_FOUND', 'INSUFFICIENT_DATA', 'NO_DECISIONS')",
+            "assessment IN ('NO_ISSUES', 'ISSUES_FOUND', 'INSUFFICIENT_DATA', 'NO_DECISIONS', 'NO_ACTIONS')",
             name="ck_decision_reviews_assessment",
         ),
         CheckConstraint(
@@ -35,6 +35,7 @@ class DecisionReviewORM(Base):
     assessment: Mapped[str] = mapped_column(String(24), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     findings: Mapped[list] = mapped_column(JSONB, nullable=False)
+    action_reviews: Mapped[list | None] = mapped_column(JSONB)
     data_gaps: Mapped[list] = mapped_column(JSONB, nullable=False)
     decision_ids: Mapped[list] = mapped_column(JSONB, nullable=False)
     input_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)

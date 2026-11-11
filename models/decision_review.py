@@ -9,6 +9,25 @@ class ReviewAssessment(str, Enum):
     ISSUES_FOUND = "ISSUES_FOUND"
     INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
     NO_DECISIONS = "NO_DECISIONS"
+    NO_ACTIONS = "NO_ACTIONS"
+
+
+class ActionVerdict(str, Enum):
+    JUSTIFIED = "JUSTIFIED"
+    QUESTIONABLE = "QUESTIONABLE"
+    ERROR = "ERROR"
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+
+
+class ActionReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action_id: str = Field(min_length=1, max_length=120)
+    action_type: str = Field(min_length=1, max_length=20)
+    verdict: ActionVerdict
+    reason: str = Field(min_length=1, max_length=600)
+    evidence: str = Field(min_length=1, max_length=600)
+    lesson: str = Field(max_length=400)
 
 
 class FindingCategory(str, Enum):
@@ -29,6 +48,7 @@ class ReviewFinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     decision_id: UUID
+    action_id: str = Field(min_length=1, max_length=120)
     category: FindingCategory
     severity: FindingSeverity
     claim: str = Field(max_length=300)
@@ -42,15 +62,20 @@ class DecisionReview(BaseModel):
 
     assessment: ReviewAssessment
     summary: str = Field(min_length=1, max_length=1000)
+    action_reviews: list[ActionReview] = Field(default_factory=list, max_length=24)
     findings: list[ReviewFinding] = Field(max_length=12)
     data_gaps: list[str] = Field(max_length=12)
 
     @model_validator(mode="after")
     def consistent_assessment(self):
         if self.assessment is ReviewAssessment.ISSUES_FOUND and not self.findings:
-            raise ValueError("ISSUES_FOUND requires at least one finding")
-        if self.assessment in {ReviewAssessment.NO_ISSUES, ReviewAssessment.NO_DECISIONS} and self.findings:
+            raise ValueError("ISSUES_FOUND requires a demonstrated error finding")
+        if self.assessment in {ReviewAssessment.NO_ISSUES, ReviewAssessment.NO_DECISIONS, ReviewAssessment.NO_ACTIONS} and self.findings:
             raise ValueError("Assessment contradicts findings")
+        if self.assessment is ReviewAssessment.NO_ISSUES and any(
+            item.verdict is ActionVerdict.ERROR for item in self.action_reviews
+        ):
+            raise ValueError("NO_ISSUES contradicts action errors")
         if self.assessment is ReviewAssessment.INSUFFICIENT_DATA and not self.data_gaps:
             raise ValueError("INSUFFICIENT_DATA requires at least one data gap")
         return self
@@ -61,10 +86,24 @@ REVIEW_SCHEMA = {
     "properties": {
         "assessment": {"type": "string", "enum": [item.value for item in ReviewAssessment]},
         "summary": {"type": "string"},
+        "action_reviews": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "action_id": {"type": "string"},
+                "action_type": {"type": "string", "enum": ["OPEN_LONG", "OPEN_SHORT", "CLOSE", "HOLD", "AUTO_CLOSE"]},
+                "verdict": {"type": "string", "enum": [item.value for item in ActionVerdict]},
+                "reason": {"type": "string"},
+                "evidence": {"type": "string"},
+                "lesson": {"type": "string"},
+            },
+            "required": ["action_id", "action_type", "verdict", "reason", "evidence", "lesson"],
+            "additionalProperties": False,
+        }},
         "findings": {"type": "array", "items": {
             "type": "object",
             "properties": {
                 "decision_id": {"type": "string", "format": "uuid"},
+                "action_id": {"type": "string"},
                 "category": {"type": "string", "enum": [item.value for item in FindingCategory]},
                 "severity": {"type": "string", "enum": [item.value for item in FindingSeverity]},
                 "claim": {"type": "string"},
@@ -72,11 +111,11 @@ REVIEW_SCHEMA = {
                 "evidence": {"type": "string"},
                 "lesson": {"type": "string"},
             },
-            "required": ["decision_id", "category", "severity", "claim", "issue", "evidence", "lesson"],
+            "required": ["decision_id", "action_id", "category", "severity", "claim", "issue", "evidence", "lesson"],
             "additionalProperties": False,
         }},
         "data_gaps": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["assessment", "summary", "findings", "data_gaps"],
+    "required": ["assessment", "summary", "action_reviews", "findings", "data_gaps"],
     "additionalProperties": False,
 }

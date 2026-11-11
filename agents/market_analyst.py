@@ -19,6 +19,10 @@ składania realnych zleceń. Proponuj kierunek i ucz na weryfikowalnych scenariu
 
 Użyj świec i wskaźników 1m dla sygnału, 15m i 1h dla kontekstu. 5m użyj
 tylko jeśli narzędzia go udostępniają; większe interwały są opcjonalne.
+Przed propozycją BUY/SELL lub CLOSE pobierz świece i wskaźniki dla 1m,
+15m i 1h. W uzasadnieniu podaj konkretny odczyt lub zamkniętą świecę
+z 15m i 1h oraz powiedz, czy wspiera działanie, czy zwiększa ryzyko.
+Jeśli któryś odczyt jest niedostępny, nazwij brak w uzasadnieniu.
 Kontekst wyższych interwałów opisuje ryzyko, ale nie musi potwierdzać
 każdego krótkiego wejścia. Akceptuj większą niepewność: wybierz BUY lub SELL,
 gdy aktualne dane 1m pokazują konkretny, nadal ważny sygnał kierunkowy.
@@ -145,6 +149,7 @@ class MarketAnalyst:
         tool_calls_used = 0
         tool_output_chars = 0
         tool_cache = {}
+        self.tool_trace = []
         final_only = False
 
         for round_number in range(MAX_ROUNDS):
@@ -190,9 +195,17 @@ class MarketAnalyst:
                     raise RuntimeError("Model returned an invalid structured decision") from None
 
             for call in calls:
+                try:
+                    trace_arguments = json.loads(call.arguments)
+                except json.JSONDecodeError:
+                    trace_arguments = {"invalid_json": True}
+                if not isinstance(trace_arguments, dict):
+                    trace_arguments = {"invalid_json": True}
+                trace = {"name": call.name, "arguments": trace_arguments}
                 if tool_calls_used >= MAX_TOOL_CALLS or tool_output_chars >= MAX_TOOL_OUTPUT_CHARS:
                     output = json.dumps({"error": "Tool budget reached; finish with available data."})
                     final_only = True
+                    trace["status"] = "BUDGET_EXCEEDED"
                 else:
                     tool_calls_used += 1
                     logger.info("Market tool call %s %s", call.name, call.arguments)
@@ -213,6 +226,22 @@ class MarketAnalyst:
                     tool_output_chars += len(output)
                     if tool_calls_used >= MAX_TOOL_CALLS:
                         final_only = True
+                if "status" not in trace:
+                    try:
+                        parsed = json.loads(output)
+                    except json.JSONDecodeError:
+                        parsed = {"error": "Invalid tool output"}
+                    trace["status"] = "ERROR" if "error" in parsed else "OK"
+                    if call.name == "get_price" and trace["status"] == "OK":
+                        trace["result"] = parsed
+                    elif call.name in {"get_candles", "get_indicators"} and trace["status"] == "OK":
+                        points = parsed.get("candles", parsed.get("indicators", []))
+                        trace["count"] = parsed.get("count", len(points))
+                        trace["latest_timestamp"] = points[-1].get("timestamp") if points else None
+                        trace["truncated"] = parsed.get("truncated", False)
+                    elif trace["status"] == "ERROR":
+                        trace["error"] = parsed.get("error")
+                self.tool_trace.append(trace)
                 input_items.append({
                     "type": "function_call_output",
                     "call_id": call.call_id,
