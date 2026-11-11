@@ -18,6 +18,22 @@ The analyst is an educational, aggressive scalping simulation. It may propose a 
 
 The tools can show price action, momentum and volatility from market data. They do not measure news or social sentiment. Each analysis can make at most 10 tool calls, each history call returns at most 50 points, and the combined tool responses are limited to 50,000 characters to bound model context size.
 
+## Two-hour decision review
+
+The read-only reviewer checks saved BTC/USD agent decisions in completed UTC windows such as `14:00–16:00`. It starts at `HH:02:20` after each even UTC hour and retries every five minutes if a review is missing or an API call fails. On startup, it checks the latest completed window. A unique database constraint prevents duplicate saved reviews or ordinary duplicate Telegram notifications. `OPENAI_API_KEY` enables it along with the market analyst; `DECISION_REVIEW_MODEL` can override `OPENAI_MODEL` for the reviewer (default: `gpt-6-luna`).
+
+For each decision, the reviewer receives its saved text, proposal and PAPER result, the last five closed 1m, 15m and 1h candles, and MA50/100/200 and Bollinger Bands reconstructed from candles available at decision time. It also receives later candles and PAPER position results within that review window as a separate outcome section. The audit asks the model to cite a specific decision and evidence for each error. Reports, input snapshots and the instruction version are saved in `decision_reviews`. The reviewer cannot trade or change the PAPER account.
+
+The original ticker readings and tool transcripts were not saved, so historical claims about the exact live quote cannot be independently checked. A later adverse price move alone does not prove the original decision was wrong. The report is an educational critique, not a ground truth label. Empty windows are recorded without calling the model.
+
+To inspect the most recent completed window without saving or notifying, run:
+
+```bash
+.venv/bin/python -m scripts.run_decision_review --preview
+```
+
+To audit a specific past window, pass its ending even UTC hour, for example `--window-end 2026-11-11T16:00:00Z`. Without `--preview`, the command saves the result once and sends a separate Telegram review notification if Telegram is configured. Apply database migrations and restart the scheduler after updating the code.
+
 ## Setup
 
 ```bash

@@ -1,6 +1,7 @@
 
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -25,9 +26,11 @@ def collect_market_data():
 
         from services.paper_orchestration import process_new_paper_candles, process_pending_decisions
         from services.telegram_notifications import process_pending_notifications
+        from services.review_notifications import process_pending_review_notifications
         process_new_paper_candles()
         process_pending_decisions()
         process_pending_notifications()
+        process_pending_review_notifications()
 
         logger.info("Pobieranie zakończone")
 
@@ -47,6 +50,21 @@ def analyze_market():
             logger.info("Analiza BTC/USD:\n%s", report.model_dump_json())
     except Exception:
         logger.exception("Błąd analizy rynku")
+
+
+def review_decisions():
+    logger.info("Rozpoczynam dwugodzinny audyt decyzji BTC/USD")
+    try:
+        from services.decision_review import run_decision_review
+        from services.review_notifications import process_pending_review_notifications
+
+        result = run_decision_review()
+        logger.info("Audyt decyzji: status=%s, okno=%s, liczba decyzji=%s, błędy=%s",
+                    result["status"], result["window_end"], result.get("decision_count"),
+                    len(result.get("findings", [])))
+        process_pending_review_notifications()
+    except Exception:
+        logger.exception("Błąd audytu decyzji")
 
 
 def main():
@@ -76,6 +94,16 @@ def main():
             misfire_grace_time=60,
         )
         logger.info("Analiza rynku włączona co 15 minut")
+        scheduler.add_job(
+            review_decisions,
+            trigger=CronTrigger(minute="2/5", second=20, timezone="UTC"),
+            id="review_btc_usd_decisions",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=300,
+            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=2),
+        )
+        logger.info("Audyt decyzji włączony dla każdego okna 2h; próba od HH:02:20 UTC, ponawiana co 5 minut")
     else:
         logger.info("Analiza rynku wyłączona: brak OPENAI_API_KEY")
 
@@ -83,7 +111,6 @@ def main():
 
     # Pierwszy import wykonujemy od razu
     collect_market_data()
-
     # Następnie działa harmonogram
     try:
         scheduler.start()

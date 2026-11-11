@@ -27,6 +27,7 @@ from database.models.indicator_snapshot import IndicatorSnapshotORM
 from database.models.market_analysis import MarketAnalysisORM
 from database.models.agent_decision import AgentDecisionORM
 from database.models.telegram_notification import TelegramNotificationORM
+from database.models.decision_review import DecisionReviewORM
 from database.models.agent_monitor_item import AgentMonitorItemORM
 from database.models.paper import (
     PaperAccountORM,
