@@ -45,6 +45,9 @@ class RiskConfig:
     emergency_drawdown: Decimal = Decimal("0.10")
     max_candle_age_seconds: int = 150
     min_consecutive_1m: int = 3
+    min_stop_m15_atr_multiple: Decimal = Decimal("0")
+    stop_swing_m15_candles: int = 2
+    stop_swing_atr_buffer: Decimal = Decimal("0")
 
     @classmethod
     def from_env(cls) -> "RiskConfig":
@@ -67,6 +70,9 @@ class RiskConfig:
             emergency_drawdown=dec(get("EMERGENCY_DRAWDOWN", "0.10")),
             max_candle_age_seconds=int(get("MAX_CANDLE_AGE_SECONDS", "150")),
             min_consecutive_1m=int(get("MIN_CONSECUTIVE_1M", "3")),
+            min_stop_m15_atr_multiple=dec(get("MIN_STOP_M15_ATR_MULTIPLE", "0")),
+            stop_swing_m15_candles=int(get("STOP_SWING_M15_CANDLES", "2")),
+            stop_swing_atr_buffer=dec(get("STOP_SWING_ATR_BUFFER", "0")),
         )
         fractions = (
             config.max_risk_per_position, config.max_total_risk,
@@ -83,6 +89,9 @@ class RiskConfig:
         if (config.min_notional <= ZERO or config.min_tp_net_profit_usd <= ZERO or
             config.max_candle_age_seconds < 1 or config.min_consecutive_1m < 1):
             raise ValueError("Paper minimum notional, TP net profit and candle age must be positive")
+        if (config.min_stop_m15_atr_multiple < ZERO or config.stop_swing_atr_buffer < ZERO or
+            config.stop_swing_m15_candles < 1):
+            raise ValueError("Paper M15 stop configuration must be nonnegative with a positive swing length")
         return config
 
     def as_dict(self) -> dict:

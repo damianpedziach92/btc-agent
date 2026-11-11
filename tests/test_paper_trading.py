@@ -30,7 +30,7 @@ def paper():
     connection = engine.connect()
     transaction = connection.begin()
     session = Session(bind=connection, autoflush=False, expire_on_commit=False)
-    service = PaperTradingService(session, account_name=f"test_{uuid4().hex}")
+    service = PaperTradingService(session, risk=RiskConfig(), account_name=f"test_{uuid4().hex}")
     try:
         yield service
     finally:
@@ -97,6 +97,69 @@ def test_seed_open_close_ledger_and_idempotence(paper):
     assert sum((row.amount_usd for row in ledger), D("0")) == account.cash_balance
     assert sum((row.margin_delta_usd for row in ledger), D("0")) == 0
     assert len([row for row in ledger if row.event_type == "EXIT_FEE"]) == 1
+
+
+def test_m15_strategy_rejects_tight_stop_and_accepts_structural_stop(paper):
+    ready(paper)
+    paper.risk = RiskConfig(min_stop_m15_atr_multiple=D("1"),
+                            stop_swing_m15_candles=2, stop_swing_atr_buffer=D("0.25"))
+    missing = paper.open_position(proposal(sl=D("95"), tp=D("110")), D("100"), T0,
+                                  execution_key="m15-missing", now=T0)
+    assert missing["status"] == "REJECTED"
+    assert "M15 ATR/swing" in missing["reason"]
+    for index in range(30):
+        at = T0 - timedelta(minutes=15 * (index + 1))
+        paper.session.add(CandleORM(
+            symbol=Instrument.BTC_USD, timeframe=Timeframe.FIFTEEN_MINUTES,
+            timestamp=at, open=D("100"), high=D("102"), low=D("98"),
+            close=D("100"), vwap=D("100"), volume=D("1"), trades=1,
+        ))
+    paper.session.flush()
+    tight = paper.open_position(proposal(sl=D("98"), tp=D("110")), D("100"), T0,
+                                execution_key="m15-tight", now=T0)
+    assert tight["status"] == "REJECTED"
+    assert "SL too close for M15 structure" in tight["reason"]
+    wide = paper.open_position(proposal(sl=D("95"), tp=D("110")), D("100"), T0,
+                               execution_key="m15-wide", now=T0)
+    assert wide["status"] == "ACCEPTED"
+
+
+def test_m15_strategy_short_stop_must_be_above_swing_and_atr(paper):
+    ready(paper)
+    paper.risk = RiskConfig(min_stop_m15_atr_multiple=D("1"),
+                            stop_swing_m15_candles=2, stop_swing_atr_buffer=D("0.25"))
+    for index in range(30):
+        paper.session.add(CandleORM(
+            symbol=Instrument.BTC_USD, timeframe=Timeframe.FIFTEEN_MINUTES,
+            timestamp=T0 - timedelta(minutes=15 * (index + 1)),
+            open=D("100"), high=D("102"), low=D("98"), close=D("100"),
+            vwap=D("100"), volume=D("1"), trades=1,
+        ))
+    paper.session.flush()
+    tight = paper.open_position(proposal("SHORT", sl=D("102"), tp=D("90")),
+                                D("100"), T0, execution_key="m15-short-tight", now=T0)
+    assert tight["status"] == "REJECTED"
+    assert "SHORT SL must be >=" in tight["reason"]
+    wide = paper.open_position(proposal("SHORT", sl=D("105"), tp=D("90")),
+                               D("100"), T0, execution_key="m15-short-wide", now=T0)
+    assert wide["status"] == "ACCEPTED"
+
+
+def test_m15_profile_increases_paper_exposure_without_leverage():
+    config = RiskConfig(
+        max_risk_per_position=D("0.02"), max_total_risk=D("0.06"),
+        max_position_margin=D("0.40"), max_total_margin=D("0.80"),
+        min_free_margin=D("0.10"), emergency_drawdown=D("0.15"),
+        min_stop_m15_atr_multiple=D("1"), stop_swing_atr_buffer=D("0.25"),
+    )
+    quantity, reason = RiskEngine(config).size(
+        side=PaperSide.LONG, entry=D("100"), stop_loss=D("95"),
+        take_profit=D("110"), equity=D("1000"), cash=D("1000"),
+        reserved=D("0"), current_risk=D("0"), position_count=0,
+        rates=okx_eea_taker_profile(),
+    )
+    assert reason == "ACCEPTED"
+    assert D("300") < quantity * D("100") <= D("400")
 
 
 @pytest.mark.parametrize("side,sl,tp,expected_entry,expected_exit", [
@@ -392,7 +455,7 @@ def test_rollover_snapshot_and_funding_sign(paper):
     assert position.accrued_holding_costs == money(first_cost)
     paper.session.flush()
     paper.session.expunge_all()  # reload persisted state like a restarted worker
-    reloaded = PaperTradingService(paper.session, account_name=paper.account_name)
+    reloaded = PaperTradingService(paper.session, risk=RiskConfig(), account_name=paper.account_name)
     position = paper.session.get(PaperPositionORM, position.id)
     account = reloaded._account()
     assert reloaded.apply_holding_costs(position, account, T0 + timedelta(hours=4), D("100")) == 0
@@ -460,7 +523,7 @@ def test_agent_open_hold_close_and_stale_close_rejected(paper):
 def test_parallel_opens_do_not_overallocate_margin():
     account_name = f"test_{uuid4().hex}"
     with SessionLocal.begin() as session:
-        service = PaperTradingService(session, account_name=account_name)
+        service = PaperTradingService(session, risk=RiskConfig(), account_name=account_name)
         mark, mark_at = service._latest_mark()
         assert mark is not None
         now = mark_at.astimezone(timezone.utc) + timedelta(seconds=10)
@@ -470,7 +533,7 @@ def test_parallel_opens_do_not_overallocate_margin():
     try:
         def attempt(index):
             with SessionLocal.begin() as session:
-                service = PaperTradingService(session, account_name=account_name)
+                service = PaperTradingService(session, risk=RiskConfig(), account_name=account_name)
                 p = proposal("LONG", mark * D("0.95"), mark * D("1.05"), now + timedelta(minutes=5))
                 return service.open_position(p, mark, now, execution_key=f"parallel:{account_name}:{index}", now=now)
 
@@ -478,7 +541,7 @@ def test_parallel_opens_do_not_overallocate_margin():
             results = list(pool.map(attempt, range(6)))
         assert any(row["status"] == "ACCEPTED" for row in results)
         with SessionLocal() as session:
-            snapshot = PaperTradingService(session, account_name=account_name).account_snapshot(now)
+            snapshot = PaperTradingService(session, risk=RiskConfig(), account_name=account_name).account_snapshot(now)
         assert snapshot["open_position_count"] <= 5
         assert D(snapshot["reserved_margin"]) <= D(snapshot["equity_estimate"]) * D("0.60")
         assert D(snapshot["cash_balance"]) - D(snapshot["reserved_margin"]) >= D(snapshot["equity_estimate"]) * D("0.20")

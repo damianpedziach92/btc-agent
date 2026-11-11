@@ -9,6 +9,7 @@ from database.connection import SessionLocal
 from models.market import Instrument, Timeframe
 from repositories.candle_repository import CandleRepository
 from services.indicators import calculate_indicator_history, MA_PERIODS
+from services.market_structure import calculate_market_structure
 from services.paper_trading import PaperTradingService
 
 
@@ -49,7 +50,7 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "name": "get_indicators",
-        "description": "Get the last N indicator readings (MA50/100/200 and 20-period Bollinger bands) for closed candles in chronological order. Earlier candles warm up moving averages. Null means insufficient consecutive candles. Start with 10-20 readings; maximum 50.",
+        "description": "Get the last N indicator readings (MA50/100/200 and Bollinger bands), plus latest Wilder ATR14, previous-20-candle price channel and recent swing levels. All use closed candles. Null means insufficient consecutive candles. Start with 10-20 readings; maximum 50.",
         "strict": True,
         "parameters": {
             "type": "object",
@@ -130,6 +131,7 @@ class MarketTools:
             "instrument": instrument.value,
             "timeframe": timeframe.value,
             "count": len(history),
+            "market_structure": calculate_market_structure(source),
             "indicators": [
                 snapshot.model_dump(mode="json", exclude={"instrument", "timeframe"})
                 for snapshot in history

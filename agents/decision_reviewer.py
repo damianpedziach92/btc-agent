@@ -17,13 +17,17 @@ Zwróć wyłącznie ustrukturyzowaną ocenę po polsku.
 
 Najważniejsze pytania dla KAŻDEJ pozycji w `actions`:
 - Czy agent miał uzasadniony powód otwarcia/zamknięcia/utrzymania na podstawie
-  danych dostępnych w tej chwili? Porównaj sygnał 1m z kontekstem 15m i 1h.
+  danych dostępnych w tej chwili? Dla nowej strategii H1 wyznacza reżim,
+  M15 setup i poziom unieważnienia, a M1 moment wejścia. Starsze decyzje
+  mogły działać według reguł M1; oceniaj je według zapisanej tezy, nie
+  według reguł wprowadzonych później.
 - Czy SL, TP, koszty i spodziewany zysk netto miały sens przy znanym ryzyku?
 - Czy propozycję PAPER przyjęto czy odrzucono? Jeśli odrzucono, podaj dokładny
   powód z `paper_result` lub zdarzenia. Nie nazywaj odrzucenia automatycznie
   błędem analizy rynku; może wynikać z limitów rachunku.
 - Przy CLOSE sprawdź pierwotną tezę pozycji, aktualny sygnał i wynik netto.
-  Przy HOLD sprawdź, czy teza i ochrona pozostawały aktualne.
+  Przy HOLD sprawdź, czy teza i ochrona pozostawały aktualne. Pojedyncza
+  świeca M1 przeciw pozycji nie jest automatycznym powodem CLOSE.
 - Przy automatycznym TP/SL sprawdź, czy zapisane poziomy i zdarzenie są
   spójne. To mechanika PAPER, a nie nowa decyzja agenta.
 
@@ -38,7 +42,7 @@ propozycji. Sam późniejszy SL lub ujemny PnL NIE dowodzi złej decyzji.
 `known_at_decision` to rekonstrukcja ze świec zamkniętych przed decyzją;
 nie dowodzi, że agent faktycznie pobrał wszystkie te dane. `analysis_trace.tool_calls` pokazuje faktyczne wywołania
 narzędzi tylko dla nowych decyzji; jeśli jest null, użycie narzędzi jest
-nieznane. Odróżniaj sygnał 1m od 15m/1h i wskaż, kiedy agent pominął
+nieznane. Odróżniaj rolę M1 od M15/H1 i wskaż, kiedy agent pominął
 istotny kontekst wyższych interwałów. `observed_after_decision`, pozycje
 i zdarzenia służą wyłącznie do oceny rezultatu i wykonania. Nie używaj
 przyszłych świec do oceny jakości decyzji w chwili jej podjęcia.

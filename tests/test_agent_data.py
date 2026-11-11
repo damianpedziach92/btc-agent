@@ -9,8 +9,10 @@ from sqlalchemy.pool import StaticPool
 
 from agents.market_tools import MarketTools
 from database.models.candle import CandleORM
+from models.candle import Candle
 from models.market import Instrument, Timeframe
 from repositories.candle_repository import CandleRepository
+from services.market_structure import calculate_market_structure
 
 
 START = datetime(2026, 11, 10, tzinfo=timezone.utc)
@@ -84,6 +86,23 @@ class AgentDataTests(unittest.TestCase):
         self.assertEqual(
             Decimal(history[-1]["bb_lower"]), Decimal("195.5") - 2 * deviation
         )
+        structure = result["market_structure"]
+        self.assertEqual(Decimal(structure["atr14"]), Decimal("1"))
+        self.assertEqual(Decimal(structure["channel_high_20"]), Decimal("204"))
+        self.assertEqual(Decimal(structure["channel_low_20"]), Decimal("185"))
+        self.assertEqual(Decimal(structure["swing_low"]), Decimal("204"))
+
+    def test_market_structure_does_not_bridge_missing_candles(self):
+        rows = [Candle(
+            instrument=Instrument.BTC_USD, timeframe=Timeframe.ONE_MINUTE,
+            timestamp=START + timedelta(minutes=minute),
+            open=Decimal("100"), high=Decimal("101"), low=Decimal("99"),
+            close=Decimal("100"), vwap=Decimal("100"), volume=Decimal("1"), trades=1,
+        ) for minute in (0, 2)]
+        structure = calculate_market_structure(rows)
+        self.assertEqual(structure["consecutive_count"], 1)
+        self.assertIsNone(structure["atr14"])
+        self.assertIsNone(structure["channel_high_20"])
 
 
 if __name__ == "__main__":

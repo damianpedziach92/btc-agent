@@ -20,6 +20,7 @@ from models.decision_review import DecisionReview, ReviewAssessment
 from models.market import Instrument, Timeframe
 from repositories.candle_repository import CandleRepository
 from services.indicators import calculate_indicators
+from services.market_structure import calculate_market_structure
 from services.telegram_notifications import TelegramConfig
 
 
@@ -122,6 +123,7 @@ def build_review_context(session: Session, window_end: datetime) -> dict:
             known[timeframe.value] = {
                 "recent_closed_candles": [_candle_summary(row) for row in eligible[-5:]],
                 "indicators_at_last_close": indicator.model_dump(mode="json") if indicator else None,
+                "market_structure": calculate_market_structure(source),
             }
         after_15m = next((row for row in candles_by_timeframe[Timeframe.FIFTEEN_MINUTES]
                           if decision.created_at < row.timestamp + timedelta(minutes=15) <= window_end), None)

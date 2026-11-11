@@ -18,6 +18,8 @@ from models.paper import (
     ZERO, FeeRates, MarketType, PaperSide, RiskConfig, RiskEngine,
     dec, entry_costs, execution_price, funding_cost, gross_pnl, money, rollover_cost,
 )
+from repositories.candle_repository import CandleRepository
+from services.market_structure import calculate_market_structure
 
 
 ACCOUNT_NAME = "default"
@@ -402,6 +404,39 @@ class PaperTradingService:
             return self._reject(account, execution_key, "Opposing BTC/USD positions are disabled", now, decision_id)
         entry = money(execution_price(mark_price, side, True, rates,
                                       bid=bid_price, ask=ask_price))
+        if self.risk.min_stop_m15_atr_multiple > ZERO:
+            rows = self.session.scalars(select(CandleORM).where(
+                CandleORM.symbol == Instrument.BTC_USD,
+                CandleORM.timeframe == Timeframe.FIFTEEN_MINUTES,
+                CandleORM.timestamp + timedelta(minutes=15) <= price_at,
+            ).order_by(CandleORM.timestamp.desc()).limit(100)).all()
+            structure = calculate_market_structure(
+                [CandleRepository._to_candle(row) for row in rows],
+                swing_candles=self.risk.stop_swing_m15_candles,
+            )
+            atr = dec(structure["atr14"]) if structure["atr14"] is not None else None
+            latest_m15_close = (datetime.fromisoformat(structure["timestamp"]) + timedelta(minutes=15)
+                                if structure["timestamp"] else None)
+            if (atr is None or proposal.stop_loss is None or structure["swing_low"] is None or
+                latest_m15_close is None or price_at - latest_m15_close > timedelta(minutes=30)):
+                return self._reject(account, execution_key,
+                                    "Fresh M15 ATR/swing data and stop loss required by strategy", now, decision_id)
+            buffer = atr * self.risk.stop_swing_atr_buffer
+            minimum_distance = atr * self.risk.min_stop_m15_atr_multiple
+            if side is PaperSide.LONG:
+                highest_allowed_stop = min(entry - minimum_distance,
+                                           dec(structure["swing_low"]) - buffer)
+                if proposal.stop_loss > highest_allowed_stop:
+                    return self._reject(account, execution_key,
+                                        f"SL too close for M15 structure; LONG SL must be <= {highest_allowed_stop:.2f}",
+                                        now, decision_id)
+            else:
+                lowest_allowed_stop = max(entry + minimum_distance,
+                                          dec(structure["swing_high"]) + buffer)
+                if proposal.stop_loss < lowest_allowed_stop:
+                    return self._reject(account, execution_key,
+                                        f"SL too close for M15 structure; SHORT SL must be >= {lowest_allowed_stop:.2f}",
+                                        now, decision_id)
         reserved = sum((p.reserved_margin for p in positions), ZERO)
         gross = sum((gross_pnl(PaperSide(p.side), p.entry_price, mark_price, p.quantity_btc)
                      for p in positions), ZERO)
