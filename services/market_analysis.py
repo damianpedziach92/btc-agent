@@ -80,6 +80,9 @@ def run_market_analysis(force: bool = False, preview: bool = False) -> AgentDeci
                             "strategy_diagnostics": {
                                 "scalp_m5": market_context.get("scalp_m5", {}).get("reason_counts", {}),
                                 "scalp_m5_candidates": len(market_context.get("scalp_m5", {}).get("candidates", [])),
+                                "scalp_m5_pending_eligible": sum(1 for item in
+                                    market_context.get("scalp_m5", {}).get("candidates", [])
+                                    if item.get("pending_eligible")),
                                 "intraday_m15_submitted_candidates": (
                                     int(bool(decision.open_proposal and decision.open_proposal.strategy and
                                              decision.open_proposal.strategy.value == "INTRADAY_M15")) +
@@ -98,6 +101,9 @@ def run_market_analysis(force: bool = False, preview: bool = False) -> AgentDeci
                                     if key != "ELIGIBLE" and count] +
                                     (["MODEL_WAIT_WITH_ELIGIBLE_CANDIDATE"] if
                                      market_context.get("scalp_m5", {}).get("reason_counts", {}).get("ELIGIBLE") else []) +
+                                    (["PENDING_ELIGIBLE_NOT_SELECTED"] if any(item.get("pending_eligible") for item in
+                                      market_context.get("scalp_m5", {}).get("candidates", [])) and
+                                      not any(action.action.value == "CREATE" for action in decision.pending_order_actions) else []) +
                                     (["MARGIN_CAP"] if paper_context.get("account") and
                                      Decimal(str(paper_context["account"].get("available_margin", "999999"))) < Decimal("10") else []) +
                                     (["DUPLICATE_SCENARIO"] if paper_context.get("pending_orders") else [])

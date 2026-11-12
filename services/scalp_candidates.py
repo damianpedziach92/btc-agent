@@ -36,9 +36,11 @@ def build_scalp_candidates(context: dict) -> dict:
                     "direction": side.value, "timeframe": "5m", "as_of": context["as_of"],
                     "reference_entry": None, "stop_loss": None, "take_profit": None,
                     "expected_rr_after_costs": None,
-                    "valid_until": (as_of + timedelta(minutes=5)).isoformat(),
+                    "valid_until": (as_of + timedelta(minutes=15)).isoformat(),
                     "trigger": None, "level": None, "invalidation": None,
-                    "reason_no_trade": None, "suggested_order_type": None}
+                    "reason_no_trade": None, "suggested_order_type": None,
+                    "pending_eligible": False, "pending_entry_level": None,
+                    "pending_rr_after_costs": None}
             reason = None
             if not fresh or len(rows) < 6:
                 reason = "ATR_DATA_GAP"
@@ -62,9 +64,11 @@ def build_scalp_candidates(context: dict) -> dict:
                 item["stop_loss"] = str(stop)
                 item["invalidation"] = str(stop)
                 trigger = False
+                formed = False
                 target = None
                 if family is ScalpSetup.M5_RANGE_REJECTION:
                     quiet = range_high-range_low <= atr*Decimal("4")
+                    formed = quiet
                     trigger = quiet and ((low <= range_low + atr*Decimal("0.35") and close > prev_close)
                                          if side is PaperSide.LONG else
                                          (high >= range_high - atr*Decimal("0.35") and close < prev_close))
@@ -77,6 +81,8 @@ def build_scalp_candidates(context: dict) -> dict:
                     older = rows[-6:-2]
                     boundary = (max(_d(row["high"]) for row in older) if side is PaperSide.LONG else
                                 min(_d(row["low"]) for row in older))
+                    formed = (_d(breakout["close"]) > boundary if side is PaperSide.LONG else
+                              _d(breakout["close"]) < boundary)
                     trigger = ((_d(breakout["close"]) > boundary and low <= boundary and close > boundary)
                                if side is PaperSide.LONG else
                                (_d(breakout["close"]) < boundary and high >= boundary and close < boundary))
@@ -85,39 +91,53 @@ def build_scalp_candidates(context: dict) -> dict:
                 else:
                     boundary = (max(_d(row["high"]) for row in rows[-6:-3]) if side is PaperSide.LONG else
                                 min(_d(row["low"]) for row in rows[-6:-3]))
+                    formed = (prev_close > boundary if side is PaperSide.LONG else prev_close < boundary)
                     trigger = ((prev_close > boundary and low <= boundary and close > boundary)
                                if side is PaperSide.LONG else
                                (prev_close < boundary and high >= boundary and close < boundary))
                     item["level"] = str(boundary)
                     item["suggested_order_type"] = "BUY_LIMIT" if side is PaperSide.LONG else "SELL_LIMIT"
                 item["trigger"] = "closed M5 retest/rejection" if trigger else None
-                if not trigger:
-                    reason = "INVALID_TRIGGER"
-                elif family is ScalpSetup.M5_RANGE_REJECTION and (
+                blocked_regime = family is ScalpSetup.M5_RANGE_REJECTION and (
                     (regime == "UP" and side is PaperSide.SHORT) or
-                    (regime == "DOWN" and side is PaperSide.LONG)):
+                    (regime == "DOWN" and side is PaperSide.LONG))
+                structural = (stop <= entry - atr*minimum if side is PaperSide.LONG else
+                              stop >= entry + atr*minimum)
+                if target is None:
+                    higher = [context["timeframes"][key]["market_structure"] for key in ("15m", "1h")]
+                    levels = [_d(s["channel_high_20" if side is PaperSide.LONG else "channel_low_20"])
+                              for s in higher]
+                    eligible = [level for level in levels if level is not None and
+                                (level > entry if side is PaperSide.LONG else level < entry)]
+                    if eligible:
+                        target = (min(eligible) - Decimal("10") if side is PaperSide.LONG else
+                                  max(eligible) + Decimal("10"))
+                rr = None
+                if target is not None and (target > entry if side is PaperSide.LONG else target < entry):
+                    item["take_profit"] = str(target)
+                    rr = risk_reward_for_rates(cfd20_rates(), side, entry, stop, target, Decimal("1"))["rr_ratio"]
+                    item["expected_rr_after_costs"] = str(rr) if rr is not None else None
+                pending_entry = _d(item["level"]) + (Decimal("10") if side is PaperSide.LONG else -Decimal("10"))
+                better_limit = (pending_entry < entry if side is PaperSide.LONG else pending_entry > entry)
+                pending_structural = (stop <= pending_entry-atr*minimum if side is PaperSide.LONG else
+                                      stop >= pending_entry+atr*minimum)
+                pending_rr = (risk_reward_for_rates(cfd20_rates(), side, pending_entry, stop, target,
+                                                   Decimal("1"))["rr_ratio"]
+                              if target is not None and pending_structural else None)
+                item["pending_entry_level"] = str(pending_entry) if better_limit else None
+                item["pending_rr_after_costs"] = str(pending_rr) if pending_rr is not None else None
+                item["pending_eligible"] = bool(formed and not blocked_regime and better_limit and
+                                                pending_rr is not None and pending_rr >= MIN_NET_RISK_REWARD)
+                if blocked_regime:
                     reason = "VOLATILITY_FILTER"
-                elif not (stop <= entry - atr*minimum if side is PaperSide.LONG else
-                          stop >= entry + atr*minimum):
+                elif not structural:
                     reason = "INVALID_SL_STRUCTURE"
-                else:
-                    if target is None:
-                        higher = [context["timeframes"][key]["market_structure"] for key in ("15m", "1h")]
-                        levels = [_d(s["channel_high_20" if side is PaperSide.LONG else "channel_low_20"])
-                                  for s in higher]
-                        eligible = [level for level in levels if level is not None and
-                                    (level > entry if side is PaperSide.LONG else level < entry)]
-                        if eligible:
-                            target = (min(eligible) - Decimal("10") if side is PaperSide.LONG else
-                                      max(eligible) + Decimal("10"))
-                    if target is None or (target <= entry if side is PaperSide.LONG else target >= entry):
-                        reason = "NO_STRUCTURAL_TARGET"
-                    else:
-                        item["take_profit"] = str(target)
-                        rr = risk_reward_for_rates(cfd20_rates(), side, entry, stop, target, Decimal("1"))["rr_ratio"]
-                        item["expected_rr_after_costs"] = str(rr) if rr is not None else None
-                        if rr is None or rr < MIN_NET_RISK_REWARD:
-                            reason = "RR_LOW"
+                elif target is None or rr is None:
+                    reason = "NO_STRUCTURAL_TARGET"
+                elif rr < MIN_NET_RISK_REWARD:
+                    reason = "RR_LOW"
+                elif not trigger:
+                    reason = "INVALID_TRIGGER"
             item["reason_no_trade"] = reason
             counts[reason or "ELIGIBLE"] = counts.get(reason or "ELIGIBLE", 0) + 1
             results.append(item)

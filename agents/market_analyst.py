@@ -81,8 +81,11 @@ M5, a nie przez arbitralne przesunięcie wymagane do R:R. Wyjście czasowe
 SCALP_M5 nastąpi najpóźniej po 60 minutach. W reason podaj strukturalne poziomy.
 Oceń sześciu deterministycznych kandydatów scalp_m5 z kontekstu;
 reason_no_trade i expected_rr_after_costs są diagnostyką, a nie sygnałem
-automatycznego wejścia. Jeśli kandydat jest poprawny, rozważ wejście lub
-LIMIT na retest. Jeśli żaden nie jest poprawny, wyjaśnij 1-3 kody przeszkód.
+automatycznego wejścia. pending_eligible oznacza wyłącznie poprawną hipotezę
+LIMIT przy lepszym kursie: sprawdź jeszcze kontekst, TTL, ryzyko i świeżość
+przed CREATE. Jeśli bezpośredni trigger nie zaszedł, ale pending_eligible
+jest true, rozważ LIMIT na retest. Jeśli żaden wariant nie jest poprawny,
+wyjaśnij 1-3 kody przeszkód.
 Backend odrzuca zbyt ciasny SL; szerszy SL zmniejszy ilość BTC wyliczoną
 przez limit ryzyka. TP opieraj na osiągalnej strefie właściwej strategii, a nie
 na małym ruchu M1. Backend wymaga netto R:R co najmniej 1,5 dla nowych
