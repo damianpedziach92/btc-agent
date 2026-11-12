@@ -104,7 +104,8 @@ def build_review_context(session: Session, window_end: datetime) -> dict:
     }
     earliest = decisions[0].created_at if decisions else window_start
     candles_by_timeframe = {}
-    for timeframe in (Timeframe.ONE_MINUTE, Timeframe.FIFTEEN_MINUTES, Timeframe.ONE_HOUR):
+    for timeframe in (Timeframe.ONE_MINUTE, Timeframe.FIVE_MINUTES,
+                      Timeframe.FIFTEEN_MINUTES, Timeframe.ONE_HOUR):
         step = timedelta(minutes=timeframe.minutes)
         candles_by_timeframe[timeframe] = list(session.scalars(select(CandleORM).where(
             CandleORM.symbol == Instrument.BTC_USD,

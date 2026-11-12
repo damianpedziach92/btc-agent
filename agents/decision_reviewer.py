@@ -18,7 +18,9 @@ Zwróć wyłącznie ustrukturyzowaną ocenę po polsku.
 Najważniejsze pytania dla KAŻDEJ pozycji w `actions`:
 - Czy agent miał uzasadniony powód otwarcia/zamknięcia/utrzymania na podstawie
   danych dostępnych w tej chwili? Dla nowej strategii H1 wyznacza reżim,
-  M15 setup i poziom unieważnienia, a M1 moment wejścia. Starsze decyzje
+  M15 setup i poziom unieważnienia, M5 potwierdza lokalny ruch, a M1 pomaga
+  w wyborze momentu wejścia. Setup M15 może być w trakcie formowania,
+  jeśli zamknięta M5 już daje sprawdzalny sygnał. Starsze decyzje
   mogły działać według reguł M1; oceniaj je według zapisanej tezy, nie
   według reguł wprowadzonych później.
 - Czy SL, TP, koszty i spodziewany zysk netto miały sens przy znanym ryzyku?
@@ -42,7 +44,7 @@ propozycji. Sam późniejszy SL lub ujemny PnL NIE dowodzi złej decyzji.
 `known_at_decision` to rekonstrukcja ze świec zamkniętych przed decyzją;
 nie dowodzi, że agent faktycznie pobrał wszystkie te dane. `analysis_trace.tool_calls` pokazuje faktyczne wywołania
 narzędzi tylko dla nowych decyzji; jeśli jest null, użycie narzędzi jest
-nieznane. Odróżniaj rolę M1 od M15/H1 i wskaż, kiedy agent pominął
+nieznane. Odróżniaj role M1, M5, M15 i H1 i wskaż, kiedy agent pominął
 istotny kontekst wyższych interwałów. `observed_after_decision`, pozycje
 i zdarzenia służą wyłącznie do oceny rezultatu i wykonania. Nie używaj
 przyszłych świec do oceny jakości decyzji w chwili jej podjęcia.

@@ -68,6 +68,8 @@ def test_window_boundaries_and_context_exclude_unclosed_candles(isolated_session
         row = decision(session, at)
         candle(session, Timeframe.ONE_MINUTE, at.replace(minute=9, second=0), "100")
         candle(session, Timeframe.ONE_MINUTE, at.replace(minute=10, second=0), "101")
+        candle(session, Timeframe.FIVE_MINUTES, at.replace(minute=5, second=0), "99")
+        candle(session, Timeframe.FIVE_MINUTES, at.replace(minute=10, second=0), "103")
         candle(session, Timeframe.FIFTEEN_MINUTES, at.replace(hour=9, minute=45, second=0), "98")
         candle(session, Timeframe.FIFTEEN_MINUTES, at.replace(minute=0, second=0), "102")
         candle(session, Timeframe.ONE_HOUR, at.replace(hour=9, minute=0, second=0), "97")
@@ -76,6 +78,7 @@ def test_window_boundaries_and_context_exclude_unclosed_candles(isolated_session
     item = context["decisions"][0]
     assert item["id"] == str(row.id)
     assert [c["close"] for c in item["known_at_decision"]["1m"]["recent_closed_candles"]] == ["100.0000000000"]
+    assert [c["close"] for c in item["known_at_decision"]["5m"]["recent_closed_candles"]] == ["99.0000000000"]
     assert [c["close"] for c in item["known_at_decision"]["15m"]["recent_closed_candles"]] == ["98.0000000000"]
     assert item["observed_after_decision"]["next_closed_15m"]["close"] == "102.0000000000"
     assert item["known_at_decision"]["1m"]["indicators_at_last_close"]["ma50"] is None

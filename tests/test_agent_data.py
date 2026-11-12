@@ -44,6 +44,21 @@ class AgentDataTests(unittest.TestCase):
                 )
                 for index in range(205)
             )
+            session.add_all(
+                CandleORM(
+                    symbol=Instrument.BTC_USD,
+                    timeframe=Timeframe.FIVE_MINUTES,
+                    timestamp=START + timedelta(minutes=index * 5),
+                    open=Decimal(index + 1),
+                    high=Decimal(index + 1),
+                    low=Decimal(index + 1),
+                    close=Decimal(index + 1),
+                    vwap=Decimal(index + 1),
+                    volume=Decimal(1),
+                    trades=1,
+                )
+                for index in range(205)
+            )
 
     @classmethod
     def tearDownClass(cls):
@@ -91,6 +106,18 @@ class AgentDataTests(unittest.TestCase):
         self.assertEqual(Decimal(structure["channel_high_20"]), Decimal("204"))
         self.assertEqual(Decimal(structure["channel_low_20"]), Decimal("185"))
         self.assertEqual(Decimal(structure["swing_low"]), Decimal("204"))
+
+    def test_five_minute_candles_and_indicators_are_available_to_agent(self):
+        with patch("agents.market_tools.SessionLocal", self.sessions):
+            tools = MarketTools()
+            candles = tools.get_candles(Instrument.BTC_USD, Timeframe.FIVE_MINUTES, 5)
+            indicators = tools.get_indicators(Instrument.BTC_USD, Timeframe.FIVE_MINUTES, 5)
+        self.assertEqual([Decimal(item["close"]) for item in candles["candles"]],
+                         [Decimal(value) for value in range(201, 206)])
+        self.assertEqual([Decimal(item["ma200"]) for item in indicators["indicators"]],
+                         [Decimal(value) + Decimal("0.5") for value in range(101, 106)])
+        self.assertEqual(indicators["timeframe"], "5m")
+        self.assertEqual(Decimal(indicators["market_structure"]["atr14"]), Decimal("1"))
 
     def test_market_structure_does_not_bridge_missing_candles(self):
         rows = [Candle(

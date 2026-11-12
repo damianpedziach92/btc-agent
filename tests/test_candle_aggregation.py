@@ -30,6 +30,7 @@ class CandleAggregationTests(unittest.TestCase):
     def test_full_utc_day_produces_all_timeframes(self):
         source = [minute_candle(index) for index in range(1440)]
         expected_counts = {
+            Timeframe.FIVE_MINUTES: 288,
             Timeframe.FIFTEEN_MINUTES: 96,
             Timeframe.ONE_HOUR: 24,
             Timeframe.FOUR_HOURS: 6,
@@ -65,6 +66,13 @@ class CandleAggregationTests(unittest.TestCase):
             START + timedelta(minutes=30),
         ])
         self.assertEqual(aggregate_candles(source, Timeframe.ONE_HOUR), [])
+
+    def test_five_minute_candle_waits_for_last_minute_and_skips_gaps(self):
+        source = [minute_candle(index) for index in range(15) if index != 7]
+        result = aggregate_candles(source, Timeframe.FIVE_MINUTES)
+        self.assertEqual([candle.timestamp for candle in result], [
+            START, START + timedelta(minutes=10),
+        ])
 
     def test_local_timezone_does_not_shift_utc_boundaries(self):
         source = [minute_candle(index) for index in range(1440, 1455)]

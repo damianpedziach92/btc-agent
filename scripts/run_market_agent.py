@@ -22,6 +22,8 @@ def main() -> None:
             ("get_paper_account", {}),
             ("get_open_positions", {}),
             ("get_price", {"instrument": "BTC/USD"}),
+            ("get_indicators", {"instrument": "BTC/USD", "timeframe": "5m", "limit": 3}),
+            ("get_candles", {"instrument": "BTC/USD", "timeframe": "5m", "limit": 3}),
             ("get_indicators", {"instrument": "BTC/USD", "timeframe": "15m", "limit": 3}),
             ("get_candles", {"instrument": "BTC/USD", "timeframe": "15m", "limit": 3}),
         ):
