@@ -39,6 +39,7 @@ Telegram uses only the transactional `paper_position_notifications` outbox for a
 .venv/bin/python -m scripts.run_market_agent --check-tools
 .venv/bin/python -m scripts.run_market_agent --preview
 .venv/bin/python -m scripts.run_market_agent --force
+.venv/bin/python -m scripts.show_scalp_diagnostics --since 2026-11-12T15:00:00Z
 .venv/bin/python -m scripts.run_decision_review --preview
 .venv/bin/python -m scripts.run_decision_review --window-end 2026-11-11T16:00:00Z
 .venv/bin/python -m scripts.run_decision_review --backfill-from 2026-11-10T00:00:00Z --backfill-to 2026-11-11T16:00:00Z

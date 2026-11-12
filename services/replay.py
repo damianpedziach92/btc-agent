@@ -157,18 +157,14 @@ class Replay:
                 }
             candidates = build_scalp_candidates({"as_of": at.isoformat(), "timeframes": timeframes})["candidates"]
             selected = next((c for c in candidates if c["setup_type"] == strategy and
-                             c["reason_no_trade"] is None), None)
+                             c["pending_eligible"]), None)
             if selected is None:
                 return None
             side = PaperSide(selected["direction"])
-            level_mid = dec(selected["level"])
-            level = level_mid + (Decimal("10") if side is PaperSide.LONG else -Decimal("10"))
-            entry = dec(selected["reference_entry"])
-            if (side is PaperSide.LONG and level >= entry) or (side is PaperSide.SHORT and level <= entry):
-                return None
+            level = dec(selected["pending_entry_level"])
             state["pending_plan"] = {"side": side, "level": level, "at": at,
                                      "expires_at": at + timedelta(minutes=15)}
-            return side, dec(selected["stop_loss"]), dec(selected["take_profit"]), strategy
+            return side, dec(selected["pending_stop_loss"]), dec(selected["take_profit"]), strategy
         if strategy == "agent_baseline":
             for decision in state.get("due_decisions", []):
                 proposal = decision.open_proposal

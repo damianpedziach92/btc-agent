@@ -15,6 +15,7 @@ from models.strategy import Strategy, validate_strategy_setup
 from services.market_context import build_market_context
 from services.paper_trading import PaperTradingService
 from services.pending_orders import PendingOrderManager
+from services.scalp_candidates import build_scalp_candidates
 
 
 D = Decimal
@@ -100,6 +101,26 @@ def test_scalp_risk_fraction_cannot_exceed_global_limit():
     assert global_quantity is not None and scalp_quantity is not None
     assert scalp_quantity < global_quantity
     assert scalp_quantity * D("50") <= D("10")
+
+
+def test_pending_limit_has_its_own_structural_stop_and_rr():
+    bars = [{"timestamp": (AT-timedelta(minutes=(10-index)*5)).isoformat(),
+             "open": "72000", "high": "72090", "low": "71890", "close": "72000"}
+            for index in range(10)]
+    empty_structure = {"channel_high_20": None, "channel_low_20": None}
+    context = {"as_of": AT.isoformat(), "timeframes": {
+        "5m": {"last_closed_at": AT.isoformat(), "consecutive_count": 25,
+               "recent_closed_candles": bars, "market_structure": {"atr14": "200"}},
+        "15m": {"recent_closed_candles": [], "market_structure": empty_structure},
+        "1h": {"recent_closed_candles": [], "market_structure": empty_structure},
+    }}
+    candidates = build_scalp_candidates(context)["candidates"]
+    candidate = next(item for item in candidates if item["setup_type"] == "M5_RANGE_REJECTION"
+                     and item["direction"] == "LONG")
+    assert candidate["reason_no_trade"] == "RR_LOW"
+    assert candidate["pending_eligible"] is True
+    assert D(candidate["pending_stop_loss"]) <= D(candidate["pending_entry_level"])-D("120")
+    assert D(candidate["pending_rr_after_costs"]) >= D("1.5")
 
 
 def test_scalp_pending_create_amend_fill_keeps_strategy_and_rr():

@@ -13,18 +13,21 @@ historycznym OHLC, więc nie dowodzą rzeczywistej kolejności zdarzeń wewnątr
 | pierwsza | M15 trend | 50 | 0/0 | 3 | +1.79 | 5.64 |
 | pierwsza | M15 breakout retest | 1 | 0/0 | 1 | -0.74 | 1.45 |
 | pierwsza | M15 mean reversion | 7 | 0/0 | 2 | +1.91 | 6.93 |
-| pierwsza | M5 pullback retest | 10 | 8/1 | 1 | -0.56 | 2.57 |
-| pierwsza | M5 range rejection | 11 | 10/1 | 1 | -0.79 | 0.79 |
-| pierwsza | M5 breakout retest | 4 | 4/0 | 0 | 0.00 | 0.00 |
+| pierwsza | M5 pullback retest | 54 | 7/3 | 3 | -1.80 | 1.80 |
+| pierwsza | M5 range rejection | 198 | 14/3 | 3 | -1.07 | 1.08 |
+| pierwsza | M5 breakout retest | 29 | 16/4 | 4 | -1.31 | 2.35 |
 | druga | agent baseline | 14 | 0/0 | 1 | -1.19 | 1.90 |
 | druga | M15 trend | 49 | 0/0 | 6 | +10.02 | 4.50 |
 | druga | M15 breakout retest | 6 | 0/0 | 2 | -2.44 | 5.78 |
 | druga | M15 mean reversion | 6 | 0/0 | 5 | -5.25 | 10.06 |
-| druga | M5 pullback retest | 14 | 12/5 | 5 | +0.41 | 3.93 |
-| druga | M5 range rejection | 13 | 13/1 | 1 | +1.22 | 0.30 |
-| druga | M5 breakout retest | 9 | 5/3 | 3 | -2.85 | 3.54 |
+| druga | M5 pullback retest | 66 | 12/3 | 3 | -2.37 | 2.37 |
+| druga | M5 range rejection | 193 | 10/3 | 3 | -1.42 | 1.42 |
+| druga | M5 breakout retest | 36 | 13/4 | 4 | -1.99 | 4.25 |
 
-W drugiej połowie warianty M5 miały odpowiednio 5, 1 i 3 transakcje.
+W drugiej połowie warianty M5 miały odpowiednio 3, 3 i 4 transakcje.
+Wszystkie trzy były na minusie po spreadzie. Liczba sygnałów oznacza
+rozpoznane kandydatury przy każdej M5, także wtedy, gdy istnieje już
+pozycja lub pending; liczba wysłanych zleceń jest oddzielna.
 Przedziały ufności w pełnym JSON są przez to bardzo szerokie. Te wyniki
 nie stanowią dowodu dodatniej przewagi ani podstawy do strojenia progów.
 Baseline agentowy odtwarza tylko zapisane propozycje natychmiastowe i

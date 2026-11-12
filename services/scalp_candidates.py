@@ -40,7 +40,7 @@ def build_scalp_candidates(context: dict) -> dict:
                     "trigger": None, "level": None, "invalidation": None,
                     "reason_no_trade": None, "suggested_order_type": None,
                     "pending_eligible": False, "pending_entry_level": None,
-                    "pending_rr_after_costs": None}
+                    "pending_stop_loss": None, "pending_rr_after_costs": None}
             reason = None
             if not fresh or len(rows) < 6:
                 reason = "ATR_DATA_GAP"
@@ -54,15 +54,17 @@ def build_scalp_candidates(context: dict) -> dict:
                 swing = rows[-SCALP_PARAMETERS_V1["swing_candles"]:]
                 buffer = Decimal(SCALP_PARAMETERS_V1["stop_buffer_atr"])
                 minimum = Decimal(SCALP_PARAMETERS_V1["minimum_stop_atr"])
-                stop = (min(_d(row["low"]) for row in swing) - atr*buffer
-                        if side is PaperSide.LONG else
-                        max(_d(row["high"]) for row in swing) + atr*buffer)
+                invalidation = (min(_d(row["low"]) for row in swing) - atr*buffer
+                                if side is PaperSide.LONG else
+                                max(_d(row["high"]) for row in swing) + atr*buffer)
                 # Levels are executable CFD prices; the reference entry is the
                 # last closed midpoint plus the opening half-spread.
                 entry = close + (Decimal("10") if side is PaperSide.LONG else Decimal("-10"))
+                stop = (min(invalidation, entry-atr*minimum) if side is PaperSide.LONG else
+                        max(invalidation, entry+atr*minimum))
                 item["reference_entry"] = str(entry)
                 item["stop_loss"] = str(stop)
-                item["invalidation"] = str(stop)
+                item["invalidation"] = str(invalidation)
                 trigger = False
                 formed = False
                 target = None
@@ -113,18 +115,21 @@ def build_scalp_candidates(context: dict) -> dict:
                         target = (min(eligible) - Decimal("10") if side is PaperSide.LONG else
                                   max(eligible) + Decimal("10"))
                 rr = None
-                if target is not None and (target > entry if side is PaperSide.LONG else target < entry):
+                if target is not None:
                     item["take_profit"] = str(target)
+                if target is not None and (target > entry if side is PaperSide.LONG else target < entry):
                     rr = risk_reward_for_rates(cfd20_rates(), side, entry, stop, target, Decimal("1"))["rr_ratio"]
                     item["expected_rr_after_costs"] = str(rr) if rr is not None else None
                 pending_entry = _d(item["level"]) + (Decimal("10") if side is PaperSide.LONG else -Decimal("10"))
                 better_limit = (pending_entry < entry if side is PaperSide.LONG else pending_entry > entry)
-                pending_structural = (stop <= pending_entry-atr*minimum if side is PaperSide.LONG else
-                                      stop >= pending_entry+atr*minimum)
-                pending_rr = (risk_reward_for_rates(cfd20_rates(), side, pending_entry, stop, target,
+                pending_stop = (min(invalidation, pending_entry-atr*minimum)
+                                if side is PaperSide.LONG else
+                                max(invalidation, pending_entry+atr*minimum))
+                pending_rr = (risk_reward_for_rates(cfd20_rates(), side, pending_entry, pending_stop, target,
                                                    Decimal("1"))["rr_ratio"]
-                              if target is not None and pending_structural else None)
+                              if target is not None and pending_stop > 0 else None)
                 item["pending_entry_level"] = str(pending_entry) if better_limit else None
+                item["pending_stop_loss"] = str(pending_stop) if better_limit else None
                 item["pending_rr_after_costs"] = str(pending_rr) if pending_rr is not None else None
                 item["pending_eligible"] = bool(formed and not blocked_regime and better_limit and
                                                 pending_rr is not None and pending_rr >= MIN_NET_RISK_REWARD)
