@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from database.connection import SessionLocal
 from database.models.agent_decision import AgentDecisionORM
+from database.models.paper import PaperPendingOrderORM
 
 
 def main() -> None:
@@ -25,13 +26,17 @@ def main() -> None:
         if since:
             statement = statement.where(AgentDecisionORM.created_at >= since)
         rows = list(session.scalars(statement))
+        order_statuses = Counter(session.scalars(select(PaperPendingOrderORM.status).where(
+            PaperPendingOrderORM.created_by_decision_id.in_([row.id for row in rows])))) if rows else Counter()
     decisions = Counter(row.decision for row in rows)
     scalp_rejections = Counter()
     backend_rejections = Counter()
+    backend_results = Counter()
     pending_eligible = submitted_m15 = submitted_m5 = 0
     diagnosed = 0
     for row in rows:
         for result in (row.paper_result or {}).get("results", []):
+            backend_results[result.get("status", "UNKNOWN")] += 1
             if result.get("status") == "REJECTED":
                 backend_rejections[str(result.get("reason", "UNKNOWN")).split(":", 1)[0]] += 1
         info = (row.analysis_trace or {}).get("strategy_diagnostics") or {}
@@ -47,6 +52,8 @@ def main() -> None:
                       "wait_ratio": decisions["WAIT"]/len(rows) if rows else None,
                       "diagnosed": diagnosed, "scalp_m5_rejections": dict(scalp_rejections),
                       "backend_rejections": dict(backend_rejections),
+                      "backend_results": dict(backend_results),
+                      "accepted_pending_order_statuses": dict(order_statuses),
                       "scalp_m5_pending_eligible": pending_eligible,
                       "submitted_pending": {"INTRADAY_M15": submitted_m15,
                                             "SCALP_M5": submitted_m5}}, ensure_ascii=False, indent=2))
