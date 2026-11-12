@@ -67,7 +67,8 @@ def ready(paper):
 
 def proposal(side="LONG", sl=None, tp=None, valid=None):
     return OpenProposal(side=side, reason="Symulowany impuls", stop_loss=sl,
-                        take_profit=tp, valid_until=valid or T0 + timedelta(minutes=10))
+                        take_profit=tp, valid_until=valid or T0 + timedelta(minutes=10),
+                        strategy="INTRADAY_M15", setup_type="M15_PULLBACK_RETEST")
 
 
 def open_one(paper, side="LONG", key="one", sl=None, tp=None):

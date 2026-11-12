@@ -30,17 +30,19 @@ def main() -> None:
     with prefix.with_suffix(".csv").open("w", newline="", encoding="utf-8") as handle:
         fields = ["strategy", "split", "side", "setup", "regime", "entry_at", "exit_at", "entry_price",
                   "exit_price", "quantity_btc", "exit_reason", "fill_assumption", "gross_pnl",
-                  "net_pnl", "fee_usd", "spread_cost_usd", "r_multiple", "duration_minutes"]
+                  "net_pnl", "fee_usd", "spread_cost_usd", "r_multiple", "duration_minutes",
+                  "mfe_usd", "mae_usd"]
         writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(trade_rows)
     lines = ["# PAPER CFD20 replay", "", report["model"], "", report["data_policy"], "",
-             "| Split | Strategy | Signals | Trades | Win rate | Gross USD | Net USD | Max DD USD | Spread USD |",
+             "| Split | Strategy | Signals | Pending / fills | Trades | Win rate | Net USD | Max DD USD | Spread USD |",
              "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
     for run in report["runs"]:
         percent = f"{Decimal(run['win_rate'])*100:.1f}%" if run["win_rate"] is not None else "n/a"
-        lines.append(f"| {run['split']} | {run['strategy']} | {run['signals']} | {run['trade_count']} | "
-                     f"{percent} | {Decimal(run['gross_pnl']):.2f} | {Decimal(run['net_pnl']):.2f} | "
+        lines.append(f"| {run['split']} | {run['strategy']} | {run['signals']} | "
+                     f"{run['pending_sent']} / {run['pending_filled']} | {run['trade_count']} | "
+                     f"{percent} | {Decimal(run['net_pnl']):.2f} | "
                      f"{Decimal(run['max_drawdown_usd']):.2f} | {Decimal(run['spread_cost_usd']):.2f} |")
     lines.extend(["", "Historical OHLC cannot establish intrabar order, broker fills or liquidity.", ""])
     prefix.with_suffix(".md").write_text("\n".join(lines), encoding="utf-8")

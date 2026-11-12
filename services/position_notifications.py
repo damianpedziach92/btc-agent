@@ -23,13 +23,14 @@ def _pl_amount(value: object, signed: bool = False) -> str:
 def format_position_notification(event: PaperPositionEventORM, position: PaperPositionORM) -> str:
     short_id = str(position.id)[:8]
     if event.type == "OPENED":
-        source = "ZLECENIE" if event.payload.get("price_source") == "pending_closed_1m_ohlc" else "AGENT"
+        source = "PENDING" if event.payload.get("price_source") == "pending_closed_1m_ohlc" else "AGENT"
         return "\n".join((
             f"🟢 PAPER BTC/USD — OTWARTA {position.side} [{short_id}]",
             f"Kurs: {_pl_amount(event.payload['execution_price'])} USD",
             f"TP: {_pl_amount(position.take_profit)} USD",
             f"SL: {_pl_amount(position.stop_loss)} USD",
             f"Źródło: {source}",
+            f"Strategia: {position.strategy or 'historyczna'} / {position.setup_type or 'brak'}",
         ))
     if event.type == "CLOSED":
         return "\n".join((

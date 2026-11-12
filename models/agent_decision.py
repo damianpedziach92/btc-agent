@@ -5,6 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from models.market import Timeframe
+from models.strategy import Strategy
 
 
 class Decision(str, Enum):
@@ -67,6 +68,7 @@ class PendingOrderAction(BaseModel):
     expires_at: datetime | None = None
     scenario_key: str | None = Field(default=None, max_length=80)
     setup_type: str | None = Field(default=None, max_length=80)
+    strategy: Strategy | None = None
     invalidating_condition: PendingInvalidation | None = None
     reason: str = Field(min_length=1, max_length=1000)
 
@@ -85,7 +87,7 @@ class PendingOrderAction(BaseModel):
                 raise ValueError("Existing order action requires id and revision")
             if self.action in (PendingActionType.CANCEL, PendingActionType.HOLD) and any(
                 getattr(self, key) is not None for key in (
-                    "order_type", "entry_level_usd", "stop_loss", "take_profit", "expires_at", "scenario_key", "setup_type", "invalidating_condition")):
+                    "order_type", "entry_level_usd", "stop_loss", "take_profit", "expires_at", "scenario_key", "setup_type", "strategy", "invalidating_condition")):
                 raise ValueError("CANCEL/HOLD cannot change order fields")
         return self
 
@@ -99,6 +101,7 @@ class OpenProposal(BaseModel):
     take_profit: Decimal | None = Field(default=None, gt=0)
     valid_until: datetime
     setup_type: str | None = Field(default=None, max_length=80)
+    strategy: Strategy | None = None
     market_regime: str | None = Field(default=None, max_length=80)
     signal_timeframe: Timeframe | None = None
     trigger_candle_timestamp: datetime | None = None
@@ -190,6 +193,7 @@ AGENT_DECISION_SCHEMA = {
                 "take_profit": {"type": ["number", "null"]},
                 "valid_until": {"type": "string"},
                 "setup_type": {"type": ["string", "null"]},
+                "strategy": {"type": ["string", "null"], "enum": [item.value for item in Strategy] + [None]},
                 "market_regime": {"type": ["string", "null"]},
                 "signal_timeframe": {"type": ["string", "null"], "enum": [item.value for item in Timeframe] + [None]},
                 "trigger_candle_timestamp": {"type": ["string", "null"]},
@@ -201,7 +205,7 @@ AGENT_DECISION_SCHEMA = {
                 "countertrend": {"type": ["boolean", "null"]},
             },
             "required": ["side", "reason", "stop_loss", "take_profit", "valid_until",
-                         "setup_type", "market_regime", "signal_timeframe", "trigger_candle_timestamp",
+                         "setup_type", "strategy", "market_regime", "signal_timeframe", "trigger_candle_timestamp",
                          "trigger_level", "trigger_condition", "invalidation_level",
                          "expected_rr_after_costs", "signal_age_seconds", "countertrend"],
             "additionalProperties": False,
@@ -234,6 +238,7 @@ AGENT_DECISION_SCHEMA = {
                     "expires_at": {"type": ["string", "null"]},
                     "scenario_key": {"type": ["string", "null"]},
                     "setup_type": {"type": ["string", "null"]},
+                    "strategy": {"type": ["string", "null"], "enum": [item.value for item in Strategy] + [None]},
                     "invalidating_condition": {"type": ["object", "null"],
                         "properties": {"timeframe": {"type": "string", "enum": [item.value for item in Timeframe]},
                                        "operator": {"type": "string", "enum": [item.value for item in TriggerCondition]},
@@ -242,7 +247,7 @@ AGENT_DECISION_SCHEMA = {
                     "reason": {"type": "string"},
                 },
                 "required": ["action", "order_id", "expected_revision", "order_type", "entry_level_usd",
-                             "stop_loss", "take_profit", "expires_at", "scenario_key", "setup_type",
+                             "stop_loss", "take_profit", "expires_at", "scenario_key", "setup_type", "strategy",
                              "invalidating_condition", "reason"],
                 "additionalProperties": False,
             },

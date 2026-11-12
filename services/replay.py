@@ -8,6 +8,7 @@ from bisect import bisect_right
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from itertools import groupby
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -17,7 +18,13 @@ from database.models.candle import CandleORM
 from database.models.paper import PaperPositionORM
 from models.market import Instrument, Timeframe
 from models.paper import (ZERO, FeeRates, PaperSide, RiskConfig, RiskEngine,
-                          barrier_touch, cfd20_rates, dec, execution_price, gross_pnl)
+                          barrier_touch, cfd20_rates, dec, execution_price, gross_pnl,
+                          risk_reward_for_rates, MIN_NET_RISK_REWARD)
+from repositories.candle_repository import CandleRepository
+from services.market_structure import calculate_market_structure
+from services.scalp_candidates import build_scalp_candidates
+from services.pending_orders import evaluate_order_candle
+from models.strategy import SCALP_PARAMETERS_V1
 
 
 def _utc(value: datetime) -> datetime:
@@ -85,7 +92,73 @@ class Replay:
         end_index = bisect_right(self.ends[timeframe], at)
         return self.rows[timeframe][max(0, end_index-count):end_index]
 
+    def _scalp_stop_ok(self, at: datetime, side: PaperSide, entry: Decimal,
+                       stop: Decimal) -> bool:
+        rows = self._available(Timeframe.FIVE_MINUTES, at, 100)
+        if not rows or at - (_utc(rows[-1].timestamp) + timedelta(minutes=5)) > timedelta(minutes=10):
+            return False
+        structure = calculate_market_structure([CandleRepository._to_candle(row) for row in rows],
+                                                swing_candles=SCALP_PARAMETERS_V1["swing_candles"])
+        if structure["atr14"] is None or structure["swing_low"] is None:
+            return False
+        atr = dec(structure["atr14"])
+        buffer = atr * dec(SCALP_PARAMETERS_V1["stop_buffer_atr"])
+        minimum = atr * dec(SCALP_PARAMETERS_V1["minimum_stop_atr"])
+        return (stop <= min(entry-minimum, dec(structure["swing_low"])-buffer)
+                if side is PaperSide.LONG else
+                stop >= max(entry+minimum, dec(structure["swing_high"])+buffer))
+
+    def _scalp_risk_ok(self, trades: list[dict], cash: Decimal,
+                       at: datetime, openings: list[datetime]) -> bool:
+        today = [trade for trade in trades if datetime.fromisoformat(trade["exit_at"]).date() == at.date()]
+        if sum((dec(trade["net_pnl"]) for trade in today), ZERO) <= -cash*self.risk.scalp_daily_loss_stop:
+            return False
+        streak = 0
+        for trade in reversed(trades):
+            if dec(trade["net_pnl"]) >= ZERO:
+                break
+            streak += 1
+        if streak >= self.risk.scalp_max_consecutive_losses:
+            return False
+        if trades and dec(trades[-1]["net_pnl"]) < ZERO and (
+            at-datetime.fromisoformat(trades[-1]["exit_at"]) <
+            timedelta(minutes=self.risk.scalp_loss_cooldown_minutes)):
+            return False
+        if sum(at-timedelta(hours=1) < opened <= at for opened in openings) >= self.risk.scalp_max_openings_per_hour:
+            return False
+        return True
+
     def _signal(self, strategy: str, at: datetime, state: dict) -> tuple[PaperSide, Decimal, Decimal, str] | None:
+        if strategy.startswith("M5_"):
+            if at.minute % 5 or at.second:
+                return None
+            timeframes = {}
+            for timeframe in (Timeframe.FIVE_MINUTES, Timeframe.FIFTEEN_MINUTES, Timeframe.ONE_HOUR):
+                available = self._available(timeframe, at, 201)
+                candles = [CandleRepository._to_candle(row) for row in available]
+                structure = calculate_market_structure(candles)
+                timeframes[timeframe.value] = {
+                    "last_closed_at": (self.ends[timeframe][bisect_right(self.ends[timeframe], at)-1].isoformat()
+                                       if available else None),
+                    "consecutive_count": structure["consecutive_count"],
+                    "market_structure": structure,
+                    "recent_closed_candles": [c.model_dump(mode="json", exclude={"instrument", "timeframe"})
+                                              for c in candles[-10:]],
+                }
+            candidates = build_scalp_candidates({"as_of": at.isoformat(), "timeframes": timeframes})["candidates"]
+            selected = next((c for c in candidates if c["setup_type"] == strategy and
+                             c["reason_no_trade"] is None), None)
+            if selected is None:
+                return None
+            side = PaperSide(selected["direction"])
+            level_mid = dec(selected["level"])
+            level = level_mid + (Decimal("10") if side is PaperSide.LONG else -Decimal("10"))
+            entry = dec(selected["reference_entry"])
+            if (side is PaperSide.LONG and level >= entry) or (side is PaperSide.SHORT and level <= entry):
+                return None
+            state["pending_plan"] = {"side": side, "level": level, "at": at,
+                                     "expires_at": at + timedelta(minutes=15)}
+            return side, dec(selected["stop_loss"]), dec(selected["take_profit"]), strategy
         if strategy == "agent_baseline":
             for decision in state.get("due_decisions", []):
                 proposal = decision.open_proposal
@@ -173,6 +246,8 @@ class Replay:
         position = None
         trades = []
         accepted = rejected = signals = stale = errors = exposure_bars = 0
+        pending_sent = pending_filled = 0
+        scalp_openings = []
         equity_peak = cash
         max_drawdown = ZERO
         max_drawdown_fraction = ZERO
@@ -186,6 +261,7 @@ class Replay:
                 state["due_decisions"] = due
             if prev_at is not None and at != prev_at + timedelta(minutes=1):
                 stale += 1
+                state.pop("pending", None)
                 if position:
                     exit_price = execution_price(bar.open, position["side"], False, self.rates)
                     cash = self._close(position, exit_price, at, "DATA_GAP", cash, trades)
@@ -203,6 +279,16 @@ class Replay:
                     position = None
             if position:
                 exposure_bars += 1
+                favorable = (execution_price(bar.high if position["side"] is PaperSide.LONG else bar.low,
+                                             position["side"], False, self.rates))
+                adverse = (execution_price(bar.low if position["side"] is PaperSide.LONG else bar.high,
+                                           position["side"], False, self.rates))
+                position["mfe_usd"] = max(position.get("mfe_usd", ZERO),
+                                          gross_pnl(position["side"], position["entry"], favorable,
+                                                    position["quantity"]))
+                position["mae_usd"] = min(position.get("mae_usd", ZERO),
+                                          gross_pnl(position["side"], position["entry"], adverse,
+                                                    position["quantity"]))
                 reason, both, fill, assumption = barrier_touch(
                     position["side"], bar, position["stop"], position["target"], self.rates)
                 if reason:
@@ -210,32 +296,81 @@ class Replay:
                                        trades, assumption)
                     position = None
                     closed_this_bar = True
-            if not closed_this_bar:
-                signal = self._signal(strategy, at, state)
-                if signal:
-                    signals += 1
-                    if position:
-                        rejected += 1
-                    else:
-                        side, stop, target, label = signal
-                        entry = execution_price(bar.open, side, True, self.rates)
+                elif strategy.startswith("M5_") and at + timedelta(minutes=1) >= position["entry_at"] + timedelta(minutes=60):
+                    cash = self._close(position, execution_price(bar.close, position["side"], False, self.rates),
+                                       at + timedelta(minutes=1), "TIMEOUT", cash, trades)
+                    position = None
+                    closed_this_bar = True
+            pending = state.get("pending")
+            if pending and not position and at > pending["at"]:
+                if at >= pending["expires_at"]:
+                    state.pop("pending", None)
+                else:
+                    fill, assumption = evaluate_order_candle(pending["order_type"], pending["level"],
+                                                              bar, self.rates.spread_usd_per_btc)
+                    if fill is not None:
+                        rr = risk_reward_for_rates(self.rates, pending["side"], fill,
+                                                   pending["stop"], pending["target"], Decimal("1"))["rr_ratio"]
                         quantity, reject_reason = RiskEngine(self.risk).size(
-                            side=side, entry=entry, stop_loss=stop, take_profit=target,
-                            equity=cash, cash=cash, reserved=ZERO, current_risk=ZERO,
-                            position_count=0, rates=self.rates)
-                        if quantity is None:
+                            side=pending["side"], entry=fill, stop_loss=pending["stop"],
+                            take_profit=pending["target"], equity=cash, cash=cash,
+                            reserved=ZERO, current_risk=ZERO, position_count=0, rates=self.rates,
+                            risk_fraction_override=self.risk.scalp_max_risk_per_position)
+                        if (rr is None or rr < MIN_NET_RISK_REWARD or quantity is None or
+                            not self._scalp_stop_ok(at, pending["side"], fill, pending["stop"]) or
+                            not self._scalp_risk_ok(trades, cash, at, scalp_openings)):
                             rejected += 1
                         else:
+                            pending_filled += 1
                             accepted += 1
+                            scalp_openings.append(at)
                             h1_context = self._available(Timeframe.ONE_HOUR, at, 2)
                             regime = ("UP" if len(h1_context) == 2 and h1_context[-1].close > h1_context[-2].close
                                       else "DOWN" if len(h1_context) == 2 and h1_context[-1].close < h1_context[-2].close
                                       else "RANGE_OR_UNKNOWN")
-                            position = {"side": side, "entry": entry, "quantity": quantity,
-                                        "stop": stop, "target": target, "entry_at": at,
-                                        "setup": label, "regime": regime, "signal_at": at,
-                                        "original_position_id": self.original_position_by_decision.get(
-                                            state.get("opening_decision_id")) if strategy == "agent_baseline" else None}
+                            position = {"side": pending["side"], "entry": fill, "quantity": quantity,
+                                        "stop": pending["stop"], "target": pending["target"],
+                                        "entry_at": at + timedelta(minutes=1), "setup": pending["setup"],
+                                        "regime": regime, "signal_at": pending["at"],
+                                        "fill_assumption": assumption}
+                        state.pop("pending", None)
+            if not closed_this_bar:
+                signal = self._signal(strategy, at, state)
+                if signal:
+                    signals += 1
+                    if position or state.get("pending") or (strategy.startswith("M5_") and
+                        not self._scalp_risk_ok(trades, cash, at, scalp_openings)):
+                        rejected += 1
+                        state.pop("pending_plan", None)
+                    else:
+                        side, stop, target, label = signal
+                        if strategy.startswith("M5_"):
+                            plan = state.pop("pending_plan")
+                            state["pending"] = {**plan, "stop": stop, "target": target,
+                                                "setup": label,
+                                                "order_type": "BUY_LIMIT" if side is PaperSide.LONG else "SELL_LIMIT"}
+                            pending_sent += 1
+                        else:
+                            entry = execution_price(bar.open, side, True, self.rates)
+                            quantity, reject_reason = RiskEngine(self.risk).size(
+                                side=side, entry=entry, stop_loss=stop, take_profit=target,
+                                equity=cash, cash=cash, reserved=ZERO, current_risk=ZERO,
+                                position_count=0, rates=self.rates)
+                            rr = risk_reward_for_rates(self.rates, side, entry, stop, target,
+                                                       Decimal("1"))["rr_ratio"]
+                            if quantity is None or rr is None or rr < MIN_NET_RISK_REWARD:
+                                rejected += 1
+                            else:
+                                accepted += 1
+                                h1_context = self._available(Timeframe.ONE_HOUR, at, 2)
+                                regime = ("UP" if len(h1_context) == 2 and h1_context[-1].close > h1_context[-2].close
+                                          else "DOWN" if len(h1_context) == 2 and h1_context[-1].close < h1_context[-2].close
+                                          else "RANGE_OR_UNKNOWN")
+                                position = {"side": side, "entry": entry, "quantity": quantity,
+                                            "stop": stop, "target": target, "entry_at": at,
+                                            "setup": label, "regime": regime, "signal_at": at,
+                                            "original_position_id": self.original_position_by_decision.get(
+                                                state.get("opening_decision_id")) if strategy == "agent_baseline" else None}
             marked = cash + (gross_pnl(position["side"], position["entry"],
                           execution_price(bar.close, position["side"], False, self.rates),
                           position["quantity"]) if position else ZERO)
@@ -252,9 +387,19 @@ class Replay:
         gross_loss = -sum((dec(trade["net_pnl"]) for trade in losses), ZERO)
         pnl = cash - Decimal("1000")
         gross_before_spread = sum((dec(trade["gross_pnl"]) for trade in trades), ZERO)
+        n = Decimal(len(trades))
+        p = Decimal(len(wins))/n if n else None
+        z = Decimal("1.96")
+        denominator = 1 + z*z/n if n else None
+        win_ci = ([str((p + z*z/(2*n) - z*(p*(1-p)/n + z*z/(4*n*n)).sqrt())/denominator),
+                   str((p + z*z/(2*n) + z*(p*(1-p)/n + z*z/(4*n*n)).sqrt())/denominator)]
+                  if n else None)
         return {"strategy": strategy, "split": split, "start": start.isoformat(), "end": end.isoformat(),
                 "signals": signals, "accepted": accepted, "rejected": rejected,
+                "pending_sent": pending_sent, "pending_filled": pending_filled,
+                "pending_fill_rate": str(Decimal(pending_filled)/pending_sent) if pending_sent else None,
                 "trade_count": len(trades), "win_rate": str(Decimal(len(wins))/len(trades)) if trades else None,
+                "win_rate_ci95_wilson": win_ci,
                 "gross_pnl": str(gross_before_spread), "net_pnl": str(pnl), "profit_factor": str(gross_profit/gross_loss) if gross_loss else None,
                 "expectancy_per_trade": str(pnl/len(trades)) if trades else None,
                 "average_win": str(gross_profit/len(wins)) if wins else None,
@@ -264,6 +409,11 @@ class Replay:
                 "exposure_fraction": str(Decimal(exposure_bars)/len(bars)) if bars else None,
                 "fee_usd": "0", "spread_cost_usd": str(sum((dec(trade["spread_cost_usd"]) for trade in trades), ZERO)),
                 "average_r_multiple": str(_mean([dec(trade["r_multiple"]) for trade in trades])) if trades else None,
+                "average_duration_minutes": str(_mean([dec(trade["duration_minutes"]) for trade in trades])) if trades else None,
+                "average_mfe_usd": str(_mean([dec(trade["mfe_usd"]) for trade in trades])) if trades else None,
+                "average_mae_usd": str(_mean([dec(trade["mae_usd"]) for trade in trades])) if trades else None,
+                "worst_loss_streak": max((sum(1 for _ in values) for is_loss, values in groupby(
+                    [dec(trade["net_pnl"]) < ZERO for trade in trades]) if is_loss), default=0),
                 "by_exit_reason": dict(Counter(trade["exit_reason"] for trade in trades)),
                 "by_entry_hour_utc": dict(Counter(trade["entry_at"][11:13] for trade in trades)),
                 "by_setup": dict(Counter(trade["setup"] for trade in trades)),
@@ -290,6 +440,8 @@ class Replay:
             "fill_assumption": assumption, "gross_pnl": str(before_spread), "net_pnl": str(gross),
             "fee_usd": "0", "spread_cost_usd": str(position["quantity"] * Decimal("20")),
             "r_multiple": str(gross/risk) if risk else None,
+            "mfe_usd": str(position.get("mfe_usd", ZERO)),
+            "mae_usd": str(position.get("mae_usd", ZERO)),
             "duration_minutes": str((at-position["entry_at"]).total_seconds()/60)})
         return cash + gross
 
@@ -299,8 +451,10 @@ class Replay:
         runs = []
         for split, start, end in (("in_sample", self.start, split_at),
                                   ("out_of_sample", split_at, self.end)):
-            for strategy in ("agent_baseline", "trend", "breakout_retest", "mean_reversion"):
+            for strategy in ("agent_baseline", "trend", "breakout_retest", "mean_reversion",
+                             "M5_PULLBACK_RETEST", "M5_RANGE_REJECTION", "M5_BREAKOUT_RETEST"):
                 runs.append(self.run(strategy, split, start, end))
         return {"model": "CFD20 | spread $20/BTC | fee 0 | simulation only",
-                "data_policy": "Closed OHLC only; entries at next M1 open, no tick sequence, no account writes",
+                "data_policy": "Closed OHLC only; baseline entries at next M1 open; M5 LIMIT orders activate on a later M1 bar; no tick sequence, no account writes. In/out-of-sample halves are descriptive, not proof of edge.",
+                "scalp_parameters_version": "SCALP_M5_V1",
                 "runs": runs}

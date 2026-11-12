@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -76,6 +77,32 @@ def run_market_analysis(force: bool = False, preview: bool = False) -> AgentDeci
         saved = AgentMemoryRepository(session).save(
             instrument, candle_timestamp, analyst.last_model, decision, active,
             analysis_trace={"paper_context": paper_context, "market_context": market_context,
+                            "strategy_diagnostics": {
+                                "scalp_m5": market_context.get("scalp_m5", {}).get("reason_counts", {}),
+                                "scalp_m5_candidates": len(market_context.get("scalp_m5", {}).get("candidates", [])),
+                                "intraday_m15_submitted_candidates": (
+                                    int(bool(decision.open_proposal and decision.open_proposal.strategy and
+                                             decision.open_proposal.strategy.value == "INTRADAY_M15")) +
+                                    sum(1 for action in decision.pending_order_actions if
+                                        action.action.value == "CREATE" and action.strategy and
+                                        action.strategy.value == "INTRADAY_M15")),
+                                "decision_strategy": (decision.open_proposal.strategy.value
+                                    if decision.open_proposal and decision.open_proposal.strategy else None),
+                                "pending_by_strategy": {
+                                    strategy: sum(1 for action in decision.pending_order_actions
+                                                  if action.action.value == "CREATE" and action.strategy and
+                                                  action.strategy.value == strategy)
+                                    for strategy in ("INTRADAY_M15", "SCALP_M5")},
+                                "wait_reason_codes": ([key for key, count in
+                                    market_context.get("scalp_m5", {}).get("reason_counts", {}).items()
+                                    if key != "ELIGIBLE" and count] +
+                                    (["MODEL_WAIT_WITH_ELIGIBLE_CANDIDATE"] if
+                                     market_context.get("scalp_m5", {}).get("reason_counts", {}).get("ELIGIBLE") else []) +
+                                    (["MARGIN_CAP"] if paper_context.get("account") and
+                                     Decimal(str(paper_context["account"].get("available_margin", "999999"))) < Decimal("10") else []) +
+                                    (["DUPLICATE_SCENARIO"] if paper_context.get("pending_orders") else [])
+                                    if decision.decision.value == "WAIT" else []),
+                            },
                             "market_context_sha256": market_context["sha256"],
                             "trigger_timeframe": Timeframe.FIVE_MINUTES.value,
                             "trigger_candle_end": candle_end.isoformat(),

@@ -15,6 +15,7 @@ from database.models.paper import (
 from database.models.position_notification import PaperPositionNotificationORM
 from models.agent_decision import AgentDecision, OpenProposal, PositionActionType, TriggerCondition
 from models.market import Instrument, Timeframe
+from models.strategy import SCALP_PARAMETERS_V1, Strategy, validate_strategy_setup
 from models.paper import (
     ZERO, BTC_STEP, CFD_FIXED_20_USD, CFD_SPREAD_USD_PER_BTC, MIN_NET_RISK_REWARD, FeeRates, MarketType, PaperSide, RiskConfig, RiskEngine,
     barrier_touch, dec, entry_costs, estimated_target_net_pnl, execution_price, funding_cost, gross_pnl, money, rollover_cost,
@@ -310,7 +311,9 @@ class PaperTradingService:
                 "notional_usd": str(p.entry_notional), "entry_price": str(p.entry_price),
                 "entry_at": iso_utc(p.entry_at), "entry_reason": p.entry_reason,
                 "agent_decision_id": str(p.agent_decision_id) if p.agent_decision_id else None,
-                "scenario_key": p.scenario_key, "stop_loss": str(p.stop_loss) if p.stop_loss else None,
+                "scenario_key": p.scenario_key, "strategy": p.strategy or "LEGACY_M15",
+                "setup_type": p.setup_type, "strategy_parameters": p.strategy_parameters,
+                "stop_loss": str(p.stop_loss) if p.stop_loss else None,
                 "take_profit": str(p.take_profit) if p.take_profit else None,
                 "current_mark_price": str(mark) if mark else None,
                 "mark_at": iso_utc(mark_at) if mark_at else None,
@@ -394,34 +397,51 @@ class PaperTradingService:
                                   bid_price=bid_price, ask_price=ask_price)
 
     def validate_stop_structure(self, side: PaperSide, entry: Decimal,
-                                stop_loss: Decimal | None, price_at: datetime) -> str | None:
-        if self.risk.min_stop_m15_atr_multiple <= ZERO:
+                                stop_loss: Decimal | None, price_at: datetime,
+                                strategy: Strategy = Strategy.INTRADAY_M15,
+                                invalidation_level: Decimal | None = None) -> str | None:
+        if strategy is Strategy.INTRADAY_M15 and self.risk.min_stop_m15_atr_multiple <= ZERO:
             return None
+        timeframe = Timeframe.FIVE_MINUTES if strategy is Strategy.SCALP_M5 else Timeframe.FIFTEEN_MINUTES
+        minutes = timeframe.minutes
+        swing_candles = SCALP_PARAMETERS_V1["swing_candles"] if strategy is Strategy.SCALP_M5 else self.risk.stop_swing_m15_candles
         rows = self.session.scalars(select(CandleORM).where(
             CandleORM.symbol == Instrument.BTC_USD,
-            CandleORM.timeframe == Timeframe.FIFTEEN_MINUTES,
-            CandleORM.timestamp + timedelta(minutes=15) <= price_at,
+            CandleORM.timeframe == timeframe,
+            CandleORM.timestamp + timedelta(minutes=minutes) <= price_at,
         ).order_by(CandleORM.timestamp.desc()).limit(100)).all()
         structure = calculate_market_structure(
             [CandleRepository._to_candle(row) for row in rows],
-            swing_candles=self.risk.stop_swing_m15_candles,
+            swing_candles=swing_candles,
         )
         atr = dec(structure["atr14"]) if structure["atr14"] is not None else None
-        latest_m15_close = (datetime.fromisoformat(structure["timestamp"]) + timedelta(minutes=15)
+        latest_close = (datetime.fromisoformat(structure["timestamp"]) + timedelta(minutes=minutes)
                             if structure["timestamp"] else None)
         if (atr is None or stop_loss is None or structure["swing_low"] is None or
-            latest_m15_close is None or price_at - latest_m15_close > timedelta(minutes=30)):
-            return "Fresh M15 ATR/swing data and stop loss required by strategy"
-        buffer = atr * self.risk.stop_swing_atr_buffer
-        minimum_distance = atr * self.risk.min_stop_m15_atr_multiple
+            latest_close is None or price_at - latest_close > timedelta(minutes=minutes * 2)):
+            return ("Fresh M15 ATR/swing data and stop loss required by strategy"
+                    if strategy is Strategy.INTRADAY_M15 else
+                    "ATR_DATA_GAP: fresh M5 ATR14/swing and stop loss required")
+        buffer = atr * (Decimal(SCALP_PARAMETERS_V1["stop_buffer_atr"])
+                        if strategy is Strategy.SCALP_M5 else self.risk.stop_swing_atr_buffer)
+        minimum_distance = atr * (Decimal(SCALP_PARAMETERS_V1["minimum_stop_atr"])
+                                  if strategy is Strategy.SCALP_M5 else self.risk.min_stop_m15_atr_multiple)
         if side is PaperSide.LONG:
             highest_allowed_stop = min(entry - minimum_distance, dec(structure["swing_low"]) - buffer)
             if stop_loss > highest_allowed_stop:
-                return f"SL too close for M15 structure; LONG SL must be <= {highest_allowed_stop:.2f}"
+                return (f"SL too close for M15 structure; LONG SL must be <= {highest_allowed_stop:.2f}"
+                        if strategy is Strategy.INTRADAY_M15 else
+                        f"INVALID_SL_STRUCTURE: M5 LONG SL must be <= {highest_allowed_stop:.2f}")
+            if invalidation_level is not None and stop_loss > invalidation_level:
+                return "INVALID_SL_STRUCTURE: LONG SL must protect invalidation"
         else:
             lowest_allowed_stop = max(entry + minimum_distance, dec(structure["swing_high"]) + buffer)
             if stop_loss < lowest_allowed_stop:
-                return f"SL too close for M15 structure; SHORT SL must be >= {lowest_allowed_stop:.2f}"
+                return (f"SL too close for M15 structure; SHORT SL must be >= {lowest_allowed_stop:.2f}"
+                        if strategy is Strategy.INTRADAY_M15 else
+                        f"INVALID_SL_STRUCTURE: M5 SHORT SL must be >= {lowest_allowed_stop:.2f}")
+            if invalidation_level is not None and stop_loss < invalidation_level:
+                return "INVALID_SL_STRUCTURE: SHORT SL must protect invalidation"
         return None
 
     def validate_entry_trigger(self, proposal: OpenProposal, side: PaperSide,
@@ -455,30 +475,64 @@ class PaperTradingService:
             return "LONG SL must protect the declared invalidation level"
         if side is PaperSide.SHORT and proposal.stop_loss < proposal.invalidation_level:
             return "SHORT SL must protect the declared invalidation level"
-        expected_net = estimated_target_net_pnl(rates, side, entry, proposal.take_profit,
-            Decimal("1"), proposal.stop_loss, 0)
-        realized_rr = expected_net / abs(entry - proposal.stop_loss)
-        if proposal.expected_rr_after_costs > realized_rr * Decimal("1.2"):
-            return f"Claimed RR {proposal.expected_rr_after_costs} exceeds executable RR {realized_rr:.3f}"
+        rr = risk_reward_for_rates(rates, side, entry, proposal.stop_loss, proposal.take_profit, Decimal("1"))["rr_ratio"]
+        if rr is None or rr < MIN_NET_RISK_REWARD:
+            return "INSUFFICIENT_RISK_REWARD"
+        if proposal.expected_rr_after_costs > rr:
+            return f"Claimed RR {proposal.expected_rr_after_costs} exceeds executable RR {rr:.3f}"
         return None
 
-    def validate_chase(self, side: PaperSide, entry: Decimal, price_at: datetime) -> str | None:
+    def validate_chase(self, side: PaperSide, entry: Decimal, price_at: datetime,
+                       strategy: Strategy = Strategy.INTRADAY_M15) -> str | None:
         multiple = self.risk.experimental_max_chase_atr
         if multiple <= ZERO:
             return None
+        timeframe = Timeframe.FIVE_MINUTES if strategy is Strategy.SCALP_M5 else Timeframe.FIFTEEN_MINUTES
         rows = self.session.scalars(select(CandleORM).where(
             CandleORM.symbol == Instrument.BTC_USD,
-            CandleORM.timeframe == Timeframe.FIFTEEN_MINUTES,
-            CandleORM.timestamp + timedelta(minutes=15) <= price_at,
+            CandleORM.timeframe == timeframe,
+            CandleORM.timestamp + timedelta(minutes=timeframe.minutes) <= price_at,
         ).order_by(CandleORM.timestamp.desc()).limit(100)).all()
         structure = calculate_market_structure([CandleRepository._to_candle(row) for row in rows])
         atr = dec(structure["atr14"]) if structure["atr14"] else None
         if not rows or atr is None:
-            return "Experimental chase filter needs closed M15 ATR"
+            return f"Experimental chase filter needs closed {timeframe.value} ATR"
         reference = rows[0].close
         distance = entry-reference if side is PaperSide.LONG else reference-entry
         if distance > atr*multiple:
-            return f"Experimental extended move: entry {distance:.2f} USD beyond M15 close, limit {atr*multiple:.2f}"
+            return f"Experimental extended move: entry {distance:.2f} USD beyond {timeframe.value} close, limit {atr*multiple:.2f}"
+        return None
+
+    def scalp_risk_error(self, account, equity: Decimal, at: datetime) -> str | None:
+        """A separate PAPER-only circuit breaker for new scalp entries."""
+        day_start = at.replace(hour=0, minute=0, second=0, microsecond=0)
+        closed = list(self.session.scalars(select(PaperPositionORM).where(
+            PaperPositionORM.account_id == account.id,
+            PaperPositionORM.strategy == Strategy.SCALP_M5.value,
+            PaperPositionORM.close_at >= day_start,
+            PaperPositionORM.close_at <= at,
+        ).order_by(PaperPositionORM.close_at.desc())))
+        realized = sum((row.realized_net_pnl or ZERO for row in closed), ZERO)
+        if realized <= -equity * self.risk.scalp_daily_loss_stop:
+            return "SCALP_DAILY_LOSS_STOP"
+        streak = 0
+        for row in closed:
+            if row.realized_net_pnl is None or row.realized_net_pnl >= ZERO:
+                break
+            streak += 1
+        if streak >= self.risk.scalp_max_consecutive_losses:
+            return "SCALP_LOSS_STREAK_STOP"
+        if closed and closed[0].realized_net_pnl is not None and closed[0].realized_net_pnl < ZERO:
+            if at - closed[0].close_at < timedelta(minutes=self.risk.scalp_loss_cooldown_minutes):
+                return "SCALP_LOSS_COOLDOWN"
+        openings = self.session.scalar(select(func.count()).select_from(PaperPositionORM).where(
+            PaperPositionORM.account_id == account.id,
+            PaperPositionORM.strategy == Strategy.SCALP_M5.value,
+            PaperPositionORM.entry_at > at-timedelta(hours=1),
+            PaperPositionORM.entry_at <= at,
+        )) or 0
+        if openings >= self.risk.scalp_max_openings_per_hour:
+            return "SCALP_HOURLY_OPENING_LIMIT"
         return None
 
     def open_position(
@@ -517,6 +571,15 @@ class PaperTradingService:
                 return self._reject(account, execution_key, "Pending order is not active or mismatched", now, decision_id)
             if price_at <= order.updated_at or price_at > order.expires_at:
                 return self._reject(account, execution_key, "Pending fill outside active interval", now, decision_id)
+            if proposal.strategy != Strategy(order.strategy or Strategy.INTRADAY_M15.value) or proposal.setup_type != order.setup_type:
+                return self._reject(account, execution_key, "Pending strategy/setup mismatch", now, decision_id)
+        strategy = proposal.strategy or Strategy.INTRADAY_M15
+        if (decision_id is not None or pending_fill) and proposal.strategy is None and not self._allow_legacy_test_entries:
+            return self._reject(account, execution_key, "STRATEGY_REQUIRED", now, decision_id)
+        setup_error = (validate_strategy_setup(strategy, proposal.setup_type)
+                       if (proposal.strategy is not None or decision_id is not None or pending_fill) else None)
+        if setup_error:
+            return self._reject(account, execution_key, setup_error, now, decision_id)
         if (not pending_fill and price_at < now - timedelta(seconds=30)) or price_at > now + timedelta(seconds=5):
             return self._reject(account, execution_key, "Ticker price is stale or future-dated", now, decision_id)
         if price_at > proposal.valid_until or (now > proposal.valid_until and not pending_fill):
@@ -556,10 +619,11 @@ class PaperTradingService:
             trigger_error = self.validate_entry_trigger(proposal, side, entry, decision, rates)
             if trigger_error:
                 return self._reject(account, execution_key, trigger_error, now, decision_id)
-        stop_error = self.validate_stop_structure(side, entry, proposal.stop_loss, price_at)
+        stop_error = self.validate_stop_structure(side, entry, proposal.stop_loss, price_at,
+                                                  strategy, proposal.invalidation_level)
         if stop_error:
             return self._reject(account, execution_key, stop_error, now, decision_id)
-        chase_error = self.validate_chase(side, entry, price_at)
+        chase_error = self.validate_chase(side, entry, price_at, strategy)
         if chase_error:
             return self._reject(account, execution_key, chase_error, now, decision_id)
         reserved = sum((p.reserved_margin for p in positions), ZERO)
@@ -579,11 +643,17 @@ class PaperTradingService:
             for p in positions if p.stop_loss is not None
             for past_rates in [FeeRates.from_dict(p.fee_snapshot)]
         ), ZERO)
+        if strategy is Strategy.SCALP_M5:
+            scalp_error = self.scalp_risk_error(account, equity, price_at)
+            if scalp_error:
+                return self._reject(account, execution_key, scalp_error, now, decision_id)
         quantity, reason = RiskEngine(self.risk).size(
             side=side, entry=entry, stop_loss=proposal.stop_loss,
             take_profit=proposal.take_profit, equity=equity,
             cash=account.cash_balance, reserved=reserved,
             current_risk=current_risk, position_count=len(positions), rates=rates,
+            risk_fraction_override=(self.risk.scalp_max_risk_per_position
+                                    if strategy is Strategy.SCALP_M5 else None),
         )
         if quantity is None:
             return self._reject(account, execution_key, reason, now, decision_id)
@@ -633,6 +703,12 @@ class PaperTradingService:
             stop_loss=proposal.stop_loss, take_profit=proposal.take_profit,
             entry_reason=proposal.reason, agent_decision_id=decision_id,
             scenario_key=None, fee_profile_id=profile.id,
+            strategy=strategy.value, setup_type=proposal.setup_type,
+            strategy_parameters=(SCALP_PARAMETERS_V1.copy() if strategy is Strategy.SCALP_M5 else
+                                 {"version": "INTRADAY_M15_V1", "swing_candles": self.risk.stop_swing_m15_candles,
+                                  "stop_buffer_atr": str(self.risk.stop_swing_atr_buffer),
+                                  "minimum_stop_atr": str(self.risk.min_stop_m15_atr_multiple),
+                                  "max_hold_hours": self.risk.max_hold_hours}),
             fee_snapshot=rates.as_dict(), initial_costs=initial_cost,
             accrued_holding_costs=ZERO, close_price=None, close_at=None,
             close_source=None, close_reason=None, close_reason_text=None,
@@ -657,6 +733,8 @@ class PaperTradingService:
             "cfd_spread_usd_per_btc": str(rates.spread_usd_per_btc),
             "execution_side": "BUY" if side is PaperSide.LONG else "SELL",
             "execution_price": str(entry), "execution_model": rates.execution_model,
+            "strategy": strategy.value, "setup_type": proposal.setup_type,
+            "source_kind": "PENDING" if pending_fill else "AGENT" if decision_id else "MANUAL_PAPER",
             "fill_assumption": "closed_1m_ohlc" if pending_fill else "quote_mid" if bid_price is not None else "last_trade_mid_assumption",
             "fee_profile_version": rates.version, "fee_status": rates.status,
         }, now, position_id, decision_id)
@@ -1065,7 +1143,10 @@ class PaperTradingService:
                 rates = FeeRates.from_dict(position.fee_snapshot)
                 reason, ambiguous, barrier_price, barrier_assumption = barrier_touch(
                     PaperSide(position.side), candle, position.stop_loss, position.take_profit, rates)
-                if reason is None and candle.timestamp + MINUTE >= position.entry_at + timedelta(hours=self.risk.max_hold_hours):
+                hold_minutes = (int((position.strategy_parameters or {}).get("max_hold_minutes", 60))
+                                if position.strategy == Strategy.SCALP_M5.value else
+                                int((position.strategy_parameters or {}).get("max_hold_hours", self.risk.max_hold_hours)) * 60)
+                if reason is None and candle.timestamp + MINUTE >= position.entry_at + timedelta(minutes=hold_minutes):
                     reason = "TIMEOUT"
                 if reason is None:
                     open_at_bar = self._positions(account.id)

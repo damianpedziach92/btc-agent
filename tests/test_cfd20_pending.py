@@ -72,7 +72,7 @@ def create_action(order_type, level, sl, tp):
     return PendingOrderAction(action="CREATE", order_type=order_type,
         entry_level_usd=level, stop_loss=sl, take_profit=tp,
         expires_at=T0+timedelta(minutes=30), scenario_key=f"s_{order_type}",
-        setup_type="pullback", reason="M15 setup confirmed")
+        setup_type="M15_PULLBACK_RETEST", strategy="INTRADAY_M15", reason="M15 setup confirmed")
 
 
 def test_cfd20_fixed_spread_and_legacy_snapshot():
@@ -152,7 +152,7 @@ def test_pending_rr_preflight_rejects_149_and_amend_below_threshold(paper):
     assert good["status"] == "PENDING"
     order_id = UUID(good["order_id"])
     amend = manager.apply_action(PendingOrderAction(action="AMEND", order_id=order_id,
-        expected_revision=1, take_profit=D("73199"), reason="too narrow"),
+        expected_revision=1, take_profit=D("73199"), strategy="INTRADAY_M15", reason="too narrow"),
         row.id, quote(), T0+timedelta(seconds=26))
     assert amend["code"] == "INSUFFICIENT_RISK_REWARD"
     order = paper.session.get(PaperPendingOrderORM, order_id)
@@ -273,7 +273,7 @@ def test_immediate_cfd_entry_requires_verifiable_closed_trigger(paper):
     row = decision(paper)
     base = dict(side="LONG", reason="M15 pullback, M1 close confirmed", stop_loss=D("72800"),
                 take_profit=D("73400"), valid_until=T0+timedelta(minutes=10),
-                setup_type="pullback", market_regime="uptrend", signal_timeframe="1m",
+                setup_type="M15_PULLBACK_RETEST", strategy="INTRADAY_M15", market_regime="uptrend", signal_timeframe="1m",
                 trigger_candle_timestamp=T0-timedelta(minutes=1), trigger_level=D("72990"),
                 trigger_condition="CLOSE_ABOVE", invalidation_level=D("72850"),
                 expected_rr_after_costs=D("1.8"), signal_age_seconds=20,
@@ -381,7 +381,7 @@ def test_pending_amend_ignores_bar_started_before_update(paper):
     paper.session.flush()
     fresh = {**quote(), "retrieved_at": (T0+timedelta(minutes=1, seconds=25)).isoformat()}
     amended = manager.apply_action(PendingOrderAction(action="AMEND", order_id=order_id,
-        expected_revision=1, entry_level_usd=D("72940"), reason="lower pullback"),
+        expected_revision=1, entry_level_usd=D("72940"), strategy="INTRADAY_M15", reason="lower pullback"),
         second_decision.id, fresh, T0+timedelta(minutes=1, seconds=25))
     assert amended["status"] == "PENDING" and amended["revision"] == 2
     add_candle(paper.session, T0+timedelta(minutes=1), high="73000", low="72920")
@@ -416,7 +416,7 @@ def test_pending_fill_notification_is_deduplicated(paper, monkeypatch):
     client = FakeClient()
     assert position_notifications.process_position_notifications(client=client)["sent"] == 1
     assert position_notifications.process_position_notifications(client=client)["sent"] == 0
-    assert "Źródło: ZLECENIE" in client.messages[0]
+    assert "Źródło: PENDING" in client.messages[0]
     assert notifications.process_pending_order_notifications(client=client)["sent"] == 0
 
 

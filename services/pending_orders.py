@@ -15,9 +15,10 @@ from sqlalchemy.orm import Session
 from database.models.candle import CandleORM
 from database.models.agent_decision import AgentDecisionORM
 from database.models.paper import PaperOrderEventORM, PaperPendingOrderORM, PaperPositionORM
-from models.agent_decision import OpenProposal, PendingActionType, PendingOrderAction, TriggerCondition
+from models.agent_decision import OpenProposal, PendingActionType, PendingOrderAction, PendingInvalidation, TriggerCondition
 from models.market import Instrument, Timeframe
 from models.paper import CFD_FIXED_20_USD, MIN_NET_RISK_REWARD, FeeRates, PaperSide, RiskEngine, ZERO, dec, estimated_target_net_pnl, risk_reward_for_rates
+from models.strategy import SCALP_PARAMETERS_V1, Strategy, validate_strategy_setup
 from services.paper_trading import MINUTE, PaperTradingService, iso_utc, require_utc, utc_now
 
 
@@ -63,7 +64,8 @@ class PendingOrderManager:
             "side": row.side, "order_type": row.order_type,
             "entry_level_usd": str(row.entry_level_usd), "stop_loss": str(row.stop_loss),
             "take_profit": str(row.take_profit), "scenario_key": row.scenario_key,
-            "setup_type": row.setup_type, "reason": row.reason,
+            "setup_type": row.setup_type, "strategy": row.strategy or Strategy.INTRADAY_M15.value,
+            "reason": row.reason,
             "invalidating_condition": row.invalidating_condition,
             "quantity_policy": row.quantity_policy,
             "created_at": iso_utc(row.created_at), "updated_at": iso_utc(row.updated_at),
@@ -121,6 +123,18 @@ class PendingOrderManager:
             return "INSUFFICIENT_RISK_REWARD"
         return None
 
+    @staticmethod
+    def _invalidation_level_error(side: PaperSide, stop: Decimal, condition) -> str | None:
+        if condition is None:
+            return None
+        if side is PaperSide.LONG and (condition.operator is not TriggerCondition.CLOSE_BELOW or
+                                       stop > condition.level):
+            return "INVALID_SL_STRUCTURE: LONG stop must protect CLOSE_BELOW invalidation"
+        if side is PaperSide.SHORT and (condition.operator is not TriggerCondition.CLOSE_ABOVE or
+                                        stop < condition.level):
+            return "INVALID_SL_STRUCTURE: SHORT stop must protect CLOSE_ABOVE invalidation"
+        return None
+
     def _reject_rr(self, account, decision_id: UUID, key: str, now: datetime,
                    source: str, side: PaperSide, entry: Decimal, stop: Decimal,
                    target: Decimal, rates: FeeRates) -> dict:
@@ -136,7 +150,8 @@ class PendingOrderManager:
 
     def _capacity_error(self, account, active: list[PaperPendingOrderORM], order_type: str,
                         entry: Decimal, stop: Decimal, target: Decimal, rates: FeeRates,
-                        mid: Decimal, now: datetime) -> str | None:
+                        mid: Decimal, now: datetime,
+                        strategy: Strategy = Strategy.INTRADAY_M15) -> str | None:
         if not self.paper._feed_is_contiguous(now):
             return "Closed 1m market data is stale or gapped"
         side = order_side(order_type)
@@ -147,11 +162,15 @@ class PendingOrderManager:
             return "Opposing open position exists"
         if any(position.scenario_key == existing.scenario_key for position in positions for existing in active):
             return "An active pending scenario already has an open position"
-        structural = self.paper.validate_stop_structure(side, entry, stop, now)
+        structural = self.paper.validate_stop_structure(side, entry, stop, now, strategy)
         if structural:
             return structural
         values = self.paper.mark_to_market(mid)
         equity = values["equity_estimate"]
+        if strategy is Strategy.SCALP_M5:
+            scalp_error = self.paper.scalp_risk_error(account, equity, now)
+            if scalp_error:
+                return scalp_error
         reserved = values["reserved_margin"]
         current_risk = sum((position.quantity_btc * abs(position.entry_price - position.stop_loss)
                             for position in positions if position.stop_loss is not None), ZERO)
@@ -161,7 +180,9 @@ class PendingOrderManager:
                 side=PaperSide(existing.side), entry=existing.entry_level_usd,
                 stop_loss=existing.stop_loss, take_profit=existing.take_profit,
                 equity=equity, cash=account.cash_balance, reserved=reserved,
-                current_risk=current_risk, position_count=len(positions), rates=past)
+                current_risk=current_risk, position_count=len(positions), rates=past,
+                risk_fraction_override=(self.paper.risk.scalp_max_risk_per_position
+                                        if existing.strategy == Strategy.SCALP_M5.value else None))
             if quantity is None:
                 return f"Potential exposure of existing order {existing.id} cannot be sized: {reason}"
             reserved += quantity * existing.entry_level_usd
@@ -169,7 +190,9 @@ class PendingOrderManager:
         quantity, reason = RiskEngine(self.paper.risk).size(
             side=side, entry=entry, stop_loss=stop, take_profit=target,
             equity=equity, cash=account.cash_balance, reserved=reserved,
-            current_risk=current_risk, position_count=len(positions), rates=rates)
+            current_risk=current_risk, position_count=len(positions), rates=rates,
+            risk_fraction_override=(self.paper.risk.scalp_max_risk_per_position
+                                    if strategy is Strategy.SCALP_M5 else None))
         return None if quantity is not None else f"Potential exposure cannot be sized: {reason}"
 
     @staticmethod
@@ -220,6 +243,9 @@ class PendingOrderManager:
         if account is None or account.status != "ACTIVE":
             return {"status": "REJECTED", "reason": "Paper account inactive or missing"}
         if action.action is PendingActionType.CREATE:
+            setup_error = validate_strategy_setup(action.strategy, action.setup_type)
+            if setup_error:
+                return {"status": "REJECTED", "reason": setup_error}
             existing = self.session.scalar(select(PaperPendingOrderORM).where(
                 PaperPendingOrderORM.execution_key == f"{decision_id}:pending:{action_index}"))
             if existing:
@@ -256,6 +282,8 @@ class PendingOrderManager:
                 return {"status": "REJECTED", "reason": "Entry level exceeds configured distance from quote"}
             error = self._level_error(action.order_type.value, action.entry_level_usd,
                                       action.stop_loss, action.take_profit, current, rates)
+            error = error or self._invalidation_level_error(order_side(action.order_type.value),
+                                                             action.stop_loss, action.invalidating_condition)
             if error:
                 if error == "INSUFFICIENT_RISK_REWARD":
                     return self._reject_rr(account, decision_id, f"{decision_id}:pending:{action_index}", now,
@@ -264,7 +292,7 @@ class PendingOrderManager:
                 return {"status": "REJECTED", "reason": error}
             error = self._capacity_error(account, active, action.order_type.value,
                                          action.entry_level_usd, action.stop_loss, action.take_profit,
-                                         rates, mid, now)
+                                         rates, mid, now, action.strategy)
             if error:
                 return {"status": "REJECTED", "reason": error}
             if any(position.scenario_key == action.scenario_key for position in self.paper._positions(account.id)):
@@ -275,7 +303,13 @@ class PendingOrderManager:
                 order_type=action.order_type.value, status="PENDING",
                 entry_level_usd=action.entry_level_usd, stop_loss=action.stop_loss,
                 take_profit=action.take_profit, scenario_key=action.scenario_key,
-                setup_type=action.setup_type, reason=action.reason,
+                setup_type=action.setup_type, strategy=action.strategy.value,
+                strategy_parameters=(SCALP_PARAMETERS_V1.copy() if action.strategy is Strategy.SCALP_M5 else
+                                     {"version": "INTRADAY_M15_V1", "swing_candles": self.paper.risk.stop_swing_m15_candles,
+                                      "stop_buffer_atr": str(self.paper.risk.stop_swing_atr_buffer),
+                                      "minimum_stop_atr": str(self.paper.risk.min_stop_m15_atr_multiple),
+                                      "max_hold_hours": self.paper.risk.max_hold_hours}),
+                reason=action.reason,
                 invalidating_condition=action.invalidating_condition.model_dump(mode="json") if action.invalidating_condition else None,
                 quantity_policy="AT_FILL_RISK_SIZED",
                 created_by_decision_id=decision_id, last_updated_by_decision_id=decision_id,
@@ -293,7 +327,8 @@ class PendingOrderManager:
                 "order_type": row.order_type, "side": row.side,
                 "stop_loss": str(row.stop_loss), "take_profit": str(row.take_profit),
                 "expires_at": iso_utc(row.expires_at), "scenario_key": row.scenario_key,
-                "setup_type": row.setup_type, "reason": row.reason,
+                "setup_type": row.setup_type, "strategy": row.strategy,
+                "strategy_parameters": row.strategy_parameters, "reason": row.reason,
                 "invalidating_condition": row.invalidating_condition,
                 "quantity_policy": row.quantity_policy,
                 "fee_snapshot": row.fee_snapshot}, decision_id)
@@ -329,6 +364,13 @@ class PendingOrderManager:
             self._event(row, "CANCELLED", now, {"reason": action.reason}, decision_id)
             return {"status": row.status, "order_id": str(row.id)}
         # AMEND updates supplied fields only; a new complete set is validated.
+        if action.strategy is None:
+            return {"status": "REJECTED", "reason": "STRATEGY_REQUIRED"}
+        if action.strategy.value != (row.strategy or Strategy.INTRADAY_M15.value):
+            return {"status": "REJECTED", "reason": "Cannot change order strategy"}
+        setup_error = validate_strategy_setup(action.strategy, action.setup_type or row.setup_type)
+        if setup_error:
+            return {"status": "REJECTED", "reason": setup_error}
         order_type = action.order_type.value if action.order_type else row.order_type
         level = action.entry_level_usd if action.entry_level_usd is not None else row.entry_level_usd
         stop = action.stop_loss if action.stop_loss is not None else row.stop_loss
@@ -352,6 +394,9 @@ class PendingOrderManager:
         if abs(level-current) > self.paper.risk.pending_max_distance_usd:
             return {"status": "REJECTED", "reason": "Entry level exceeds configured distance from quote"}
         error = self._level_error(order_type, level, stop, target, current, rates)
+        error = error or self._invalidation_level_error(order_side(order_type), stop,
+            action.invalidating_condition or (PendingInvalidation.model_validate(row.invalidating_condition)
+                                               if row.invalidating_condition else None))
         if error:
             if error == "INSUFFICIENT_RISK_REWARD":
                 return self._reject_rr(account, decision_id, f"{decision_id}:pending-amend:{row.id}", now,
@@ -361,7 +406,8 @@ class PendingOrderManager:
             PaperPendingOrderORM.account_id == account.id,
             PaperPendingOrderORM.status == "PENDING",
             PaperPendingOrderORM.id != row.id).with_for_update()))
-        error = self._capacity_error(account, active, order_type, level, stop, target, rates, mid, now)
+        error = self._capacity_error(account, active, order_type, level, stop, target, rates, mid, now,
+                                     action.strategy)
         if error:
             return {"status": "REJECTED", "reason": error}
         row.revision += 1
@@ -454,7 +500,9 @@ class PendingOrderManager:
                 event_at = (candle.timestamp + MINUTE).astimezone(timezone.utc)
                 proposal = OpenProposal(side=side.value, reason=row.reason,
                     stop_loss=row.stop_loss, take_profit=row.take_profit,
-                    valid_until=row.expires_at.astimezone(timezone.utc))
+                    valid_until=row.expires_at.astimezone(timezone.utc),
+                    strategy=Strategy(row.strategy or Strategy.INTRADAY_M15.value),
+                    setup_type=row.setup_type)
                 opened = self.paper.open_position(
                     proposal, mid, event_at, execution_key=f"pending-fill:{row.id}",
                     source="pending_closed_1m_ohlc", now=now, pending_order_id=row.id)
@@ -462,6 +510,11 @@ class PendingOrderManager:
                 row.updated_at = now
                 row.trigger_trace = {"candle_timestamp": iso_utc(candle.timestamp),
                     "market_mid": str(mid), "cfd_executable_price": str(fill_price),
+                    "expected_entry_price": str(row.entry_level_usd),
+                    "executed_entry_price": str(fill_price),
+                    "spread_usd_per_btc": str(rates.spread_usd_per_btc),
+                    "execution_model": rates.execution_model,
+                    "gap_fill": assumption == "STOP_GAP_OPEN",
                     "fill_assumption": assumption, "processed_at": iso_utc(now)}
                 if opened["status"] == "ACCEPTED":
                     row.status = "FILLED"
@@ -469,6 +522,17 @@ class PendingOrderManager:
                     row.filled_at = event_at
                     position = self.session.get(PaperPositionORM, row.position_id)
                     position.scenario_key = row.scenario_key
+                    if row.strategy_parameters:
+                        position.strategy_parameters = row.strategy_parameters
+                    rr = risk_reward_for_rates(rates, side, position.entry_price,
+                                               position.stop_loss, position.take_profit,
+                                               position.quantity_btc)
+                    row.trigger_trace = {**row.trigger_trace, "quantity_btc": str(position.quantity_btc),
+                        "gross_loss_usd": str(abs(position.entry_price-position.stop_loss)*position.quantity_btc),
+                        "gross_gain_usd": str(abs(position.take_profit-position.entry_price)*position.quantity_btc),
+                        "net_risk_usd": str(rr["risk_net_usd"]),
+                        "net_reward_usd": str(rr["reward_net_usd"]),
+                        "rr_ratio": str(rr["rr_ratio"])}
                     self._event(row, "FILLED", now, {**row.trigger_trace,
                         "position_id": str(row.position_id), "quantity_btc": str(position.quantity_btc),
                         "entry_price": str(position.entry_price)}, row.created_by_decision_id)
@@ -476,6 +540,7 @@ class PendingOrderManager:
                 else:
                     row.status = "REJECTED"
                     row.cancel_reason = opened["reason"]
+                    row.trigger_trace = {**row.trigger_trace, "rejected_reason": opened["reason"]}
                     self._event(row, "REJECTED_RISK_AT_TRIGGER", now,
                                 {**row.trigger_trace, "reason": opened["reason"]}, row.created_by_decision_id)
                 break

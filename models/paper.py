@@ -57,6 +57,11 @@ class RiskConfig:
     pending_max_active: int = 3
     pending_max_ttl_minutes: int = 60
     pending_max_distance_usd: Decimal = Decimal("2000")
+    scalp_max_risk_per_position: Decimal = Decimal("0.01")
+    scalp_daily_loss_stop: Decimal = Decimal("0.03")
+    scalp_max_consecutive_losses: int = 3
+    scalp_loss_cooldown_minutes: int = 15
+    scalp_max_openings_per_hour: int = 4
 
     @classmethod
     def from_env(cls) -> "RiskConfig":
@@ -87,12 +92,18 @@ class RiskConfig:
             pending_max_active=int(get("PENDING_MAX_ACTIVE", "3")),
             pending_max_ttl_minutes=int(get("PENDING_MAX_TTL_MINUTES", "60")),
             pending_max_distance_usd=dec(get("PENDING_MAX_DISTANCE_USD", "2000")),
+            scalp_max_risk_per_position=dec(get("SCALP_MAX_RISK_PER_POSITION", "0.01")),
+            scalp_daily_loss_stop=dec(get("SCALP_DAILY_LOSS_STOP", "0.03")),
+            scalp_max_consecutive_losses=int(get("SCALP_MAX_CONSECUTIVE_LOSSES", "3")),
+            scalp_loss_cooldown_minutes=int(get("SCALP_LOSS_COOLDOWN_MINUTES", "15")),
+            scalp_max_openings_per_hour=int(get("SCALP_MAX_OPENINGS_PER_HOUR", "4")),
         )
         fractions = (
             config.max_risk_per_position, config.max_total_risk,
             config.max_position_margin, config.max_total_margin,
             config.min_free_margin, config.no_sl_max_margin,
             config.emergency_drawdown,
+            config.scalp_max_risk_per_position, config.scalp_daily_loss_stop,
         )
         if any(not ZERO < value <= ONE for value in fractions):
             raise ValueError("Paper risk fractions must be between 0 and 1")
@@ -110,6 +121,9 @@ class RiskConfig:
             not 1 <= config.pending_max_ttl_minutes <= 240 or
             config.stop_swing_m15_candles < 1):
             raise ValueError("Paper M15 stop configuration must be nonnegative with a positive swing length")
+        if (config.scalp_max_consecutive_losses < 1 or config.scalp_loss_cooldown_minutes < 0 or
+            config.scalp_max_openings_per_hour < 1):
+            raise ValueError("Paper scalp limits must be positive")
         return config
 
     def as_dict(self) -> dict:
@@ -205,15 +219,17 @@ def gross_pnl(side: PaperSide, entry: Decimal, exit_price: Decimal, quantity: De
 def calculate_risk_reward(
     side: PaperSide, entry_execution_price: Decimal, stop_execution_price: Decimal,
     target_execution_price: Decimal, quantity: Decimal, entry_costs: Decimal,
-    exit_costs: Decimal,
+    exit_costs: Decimal, target_exit_costs: Decimal | None = None,
 ) -> dict[str, Decimal | None]:
     """Net R:R from executable prices; SL/TP already include the CFD spread."""
+    if target_exit_costs is None:
+        target_exit_costs = exit_costs
     values = (entry_execution_price, stop_execution_price, target_execution_price,
-              quantity, entry_costs, exit_costs)
+              quantity, entry_costs, exit_costs, target_exit_costs)
     if any(not dec(value).is_finite() for value in values) or quantity <= ZERO:
         raise ValueError("Risk/reward inputs must be finite and quantity positive")
     stop_net = gross_pnl(side, entry_execution_price, stop_execution_price, quantity) - entry_costs - exit_costs
-    target_net = gross_pnl(side, entry_execution_price, target_execution_price, quantity) - entry_costs - exit_costs
+    target_net = gross_pnl(side, entry_execution_price, target_execution_price, quantity) - entry_costs - target_exit_costs
     risk = -stop_net
     reward = target_net
     valid_levels = (entry_execution_price > ZERO and stop_execution_price > ZERO and
@@ -228,9 +244,9 @@ def calculate_risk_reward(
 def risk_reward_for_rates(rates: FeeRates, side: PaperSide, entry: Decimal,
                           stop: Decimal, target: Decimal, quantity: Decimal) -> dict[str, Decimal | None]:
     opening = entry_costs(rates, side, quantity, entry)[0]
-    # The higher closing fee is conservative for both outcomes. CFD20 has zero fees.
-    closing = quantity * max(stop, target) * rates.trade_exit_fee_rate
-    return calculate_risk_reward(side, entry, stop, target, quantity, opening, closing)
+    return calculate_risk_reward(side, entry, stop, target, quantity, opening,
+                                 quantity * stop * rates.trade_exit_fee_rate,
+                                 quantity * target * rates.trade_exit_fee_rate)
 
 
 def entry_costs(rates: FeeRates, side: PaperSide, quantity: Decimal, entry: Decimal) -> tuple[Decimal, dict]:
@@ -292,6 +308,7 @@ class RiskEngine:
         take_profit: Decimal | None, equity: Decimal, cash: Decimal,
         reserved: Decimal, current_risk: Decimal, position_count: int,
         rates: FeeRates,
+        risk_fraction_override: Decimal | None = None,
     ) -> tuple[Decimal | None, str]:
         c = self.config
         if rates.status == "UNCONFIGURED":
@@ -332,7 +349,8 @@ class RiskEngine:
         ]
         cap_quantity = min(limits)
         if stop_loss is not None:
-            risk_budget = min(equity * c.max_risk_per_position,
+            risk_budget = min(equity * (min(c.max_risk_per_position, risk_fraction_override)
+                                        if risk_fraction_override is not None else c.max_risk_per_position),
                               equity * c.max_total_risk - current_risk)
             per_btc = abs(entry - stop_loss) + entry_cost_per_btc + stop_loss * rates.trade_exit_fee_rate + (
                 entry * rates.rollover_rate_per_4h if rates.market_type is MarketType.SPOT_MARGIN else ZERO)

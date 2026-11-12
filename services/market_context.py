@@ -11,6 +11,7 @@ from models.market import Instrument, Timeframe
 from repositories.candle_repository import CandleRepository
 from services.indicators import calculate_indicators
 from services.market_structure import calculate_market_structure
+from services.scalp_candidates import build_scalp_candidates
 
 
 def build_market_context(session: Session, as_of: datetime, ticker: dict | None = None) -> dict:
@@ -54,6 +55,7 @@ def build_market_context(session: Session, as_of: datetime, ticker: dict | None 
                              "trade_fee_rate": "0", "financing_rate": "0",
                              "min_net_risk_reward": "1.5",
                              "rr_formula": "LONG: (TP-entry)/(entry-SL); SHORT: (entry-TP)/(SL-entry). Entry is executable CFD price; SL/TP are executable closing prices."}}
+    result["scalp_m5"] = build_scalp_candidates(result)
     payload = json.dumps(result, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     result["sha256"] = sha256(payload.encode("utf-8")).hexdigest()
     return result

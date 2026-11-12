@@ -41,12 +41,16 @@ def test_replay_uses_closed_context_and_never_writes_ledger():
         before = session.scalar(select(func.count()).select_from(PaperAccountLedgerORM))
         replay = Replay(session, at, at + timedelta(minutes=3), risk=RiskConfig())
         outcome = replay.run("trend", "test", at, at + timedelta(minutes=3))
+        comparison = replay.compare()
         after = session.scalar(select(func.count()).select_from(PaperAccountLedgerORM))
         assert before == after
         assert outcome["trade_count"] == 1
         assert Decimal(outcome["gross_pnl"]) == 0
         assert Decimal(outcome["net_pnl"]) == -Decimal(outcome["spread_cost_usd"])
         assert outcome["llm_calls"] == 0
+        assert {run["strategy"] for run in comparison["runs"]} >= {
+            "M5_PULLBACK_RETEST", "M5_RANGE_REJECTION", "M5_BREAKOUT_RETEST"}
+        assert all(run["pending_sent"] >= run["pending_filled"] for run in comparison["runs"])
     finally:
         session.close()
         transaction.rollback()
