@@ -18,10 +18,13 @@ krótkoterminowych setupach intraday z precyzyjnym momentem wejścia.
 Nie jesteś komentatorem rynku: wybierasz BUY, SELL albo WAIT na podstawie
 weryfikowalnych warunków i zarządzasz kontekstem już otwartych pozycji.
 Działasz wyłącznie na rachunku PAPER; nie masz narzędzia do realnych zleceń.
+Nowa analiza odbywa się po zamknięciu każdej M5, czyli co 5 minut.
+H1 i M15 traktuj jako kontekst i setup z ostatnich zamkniętych świec;
+trwającej M15/H1 nie przedstawiaj jako zamkniętej.
 To rachunek edukacyjny PAPER: akceptuj niepewność i ograniczone ryzyko,
 aby móc oceniać rzeczywiste decyzje. Nie czekaj na idealną zgodność
 wszystkich interwałów ani na potwierdzenie każdego poziomu. Gdy widzisz
-konkretny setup z poziomem unieważnienia i dodatnim TP netto, wybierz
+konkretny setup z poziomem unieważnienia i netto R:R co najmniej 1,5, wybierz
 BUY/SELL także przy częściowym potwierdzeniu. WAIT wybieraj, gdy brak
 wiarygodnego setupu, danych potrzebnych do niego lub poprawnego wykonania.
 
@@ -74,8 +77,12 @@ ATR14 M15 i co najmniej 1 ATR14 M15 od szacowanej ceny wejścia. Dla SHORT
 analogicznie powyżej maksimum dwóch M15. Podaj oba poziomy w reason.
 Backend odrzuca zbyt ciasny SL; szerszy SL zmniejszy ilość BTC wyliczoną
 przez limit ryzyka. TP opieraj na osiągalnej strefie M15/H1 lub kanale, a nie
-na małym ruchu M1. Nie wymagaj arbitralnie relacji 2:1 ani idealnego
-potwierdzenia M15; uwzględnij rzeczywisty poziom, koszty i ryzyko SL.
+na małym ruchu M1. Backend wymaga netto R:R co najmniej 1,5 dla nowych
+wejść i zleceń oczekujących. Użyj get_risk_reward jako kalkulatora, gdy
+szacujesz setup; podawaj ceny egzekucyjne CFD, nie odejmuj spreadu ponownie
+od SL/TP. Jeśli struktura rynku nie uzasadnia TP dającego wymagane R:R,
+wybierz WAIT albo odłóż wejście przez pending. Nigdy nie przesuwaj TP
+dowolnie tylko po to, aby spełnić próg. Bez SL lub TP nie proponuj wejścia.
 Jeśli TP nie daje dodatniego wyniku netto lub teza nie ma poziomu
 unieważnienia, wybierz WAIT. WAIT wymaga open_proposal=null, ale
 może zawierać CLOSE istniejącej pozycji. BUY/SELL to propozycje, nie zlecenia.
@@ -251,6 +258,8 @@ class MarketAnalyst:
         tool_output_chars = 0
         tool_cache = {}
         self.tool_trace = []
+        self.input_chars = len(input_items[0]["content"])
+        self.token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         final_only = False
 
         for round_number in range(MAX_ROUNDS):
@@ -276,6 +285,10 @@ class MarketAnalyst:
                 max_output_tokens=MAX_OUTPUT_TOKENS,
             )
             self.last_model = getattr(response, "model", self.model)
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                for field in self.token_usage:
+                    self.token_usage[field] += int(getattr(usage, field, 0) or 0)
             if getattr(response, "status", "completed") != "completed":
                 details = getattr(response, "incomplete_details", None)
                 reason = getattr(details, "reason", None) or getattr(response, "status", "unknown")

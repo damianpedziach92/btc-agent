@@ -396,7 +396,7 @@ def run_decision_review(
             data_gaps=review.data_gaps,
             decision_ids=[item["id"] for item in context["decisions"]],
             input_snapshot=context,
-            notification_status="PENDING" if TelegramConfig.from_env() else "DISABLED",
+            notification_status="DISABLED",
             notification_attempts=0, notified_at=None, notification_error=None,
         ).on_conflict_do_nothing(constraint="uq_decision_reviews_instrument_window")
             .returning(DecisionReviewORM.id)).scalar()

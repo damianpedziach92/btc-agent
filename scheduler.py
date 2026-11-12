@@ -27,14 +27,11 @@ def collect_market_data():
         logger.exception("Błąd pobierania świec; kontynuuję przetwarzanie zapisanych M1")
     try:
         from services.paper_orchestration import process_new_paper_candles, process_pending_decisions, process_pending_orders
-        from services.telegram_notifications import process_pending_notifications, process_pending_order_notifications
-        from services.review_notifications import process_pending_review_notifications
+        from services.position_notifications import process_position_notifications
         process_new_paper_candles()
         process_pending_orders()
         process_pending_decisions()
-        process_pending_notifications()
-        process_pending_order_notifications()
-        process_pending_review_notifications()
+        process_position_notifications()
 
         logger.info("Pobieranie zakończone")
 
@@ -60,13 +57,11 @@ def review_decisions():
     logger.info("Rozpoczynam dwugodzinny audyt decyzji BTC/USD")
     try:
         from services.decision_review import run_decision_review
-        from services.review_notifications import process_pending_review_notifications
 
         result = run_decision_review()
         logger.info("Audyt decyzji: status=%s, okno=%s, liczba decyzji=%s, błędy=%s",
                     result["status"], result["window_end"], result.get("decision_count"),
                     len(result.get("findings", [])))
-        process_pending_review_notifications()
     except Exception:
         logger.exception("Błąd audytu decyzji")
 
@@ -91,13 +86,13 @@ def main():
     if os.getenv("OPENAI_API_KEY"):
         scheduler.add_job(
             analyze_market,
-            trigger=CronTrigger(minute="*/15", second=20, timezone="UTC"),
+            trigger=CronTrigger(minute="*/5", second=25, timezone="UTC"),
             id="analyze_btc_usd",
             max_instances=1,
             coalesce=True,
             misfire_grace_time=60,
         )
-        logger.info("Analiza rynku włączona co 15 minut")
+        logger.info("Analiza rynku włączona co 5 minut po zamknięciu M5")
         scheduler.add_job(
             review_decisions,
             trigger=CronTrigger(minute="2/5", second=20, timezone="UTC"),

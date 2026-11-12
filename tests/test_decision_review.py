@@ -252,7 +252,7 @@ def test_reviewer_batches_large_context_and_covers_every_action():
     assert all(len(request["input"][0]["content"]) < 100_000 for request in responses.requests)
 
 
-def test_review_is_saved_once_and_telegram_retries_without_duplicate(isolated_sessions, monkeypatch):
+def test_review_is_saved_once_without_telegram(isolated_sessions, monkeypatch):
     monkeypatch.setattr(decision_review, "SessionLocal", isolated_sessions)
     monkeypatch.setattr(review_notifications, "SessionLocal", isolated_sessions)
     monkeypatch.setattr(decision_review.TelegramConfig, "from_env", lambda: object())
@@ -267,7 +267,7 @@ def test_review_is_saved_once_and_telegram_retries_without_duplicate(isolated_se
     )
     assert result["status"] == "CREATED"
     assert result["assessment"] == "ISSUES_FOUND"
-    assert result["notification_status"] == "PENDING"
+    assert result["notification_status"] == "DISABLED"
     assert decision_review.run_decision_review(
         window_end=END, now=END + timedelta(minutes=4), client=client,
     )["status"] == "EXISTS"
@@ -284,15 +284,12 @@ def test_review_is_saved_once_and_telegram_retries_without_duplicate(isolated_se
                 raise TelegramDeliveryError("Telegram HTTP 503")
 
     telegram = FakeTelegram()
-    assert process_pending_review_notifications(client=telegram)["failed"] == 1
-    telegram.fail = False
-    assert process_pending_review_notifications(client=telegram)["sent"] == 1
     assert process_pending_review_notifications(client=telegram)["sent"] == 0
-    assert "&lt;trend&gt;" in telegram.messages[-1]
+    assert telegram.messages == []
     with isolated_sessions() as session:
         stored = session.get(DecisionReviewORM, result["id"])
-        assert stored.notification_status == "SENT"
-        assert stored.notification_attempts == 2
+        assert stored.notification_status == "DISABLED"
+        assert stored.notification_attempts == 0
 
 
 def test_empty_window_needs_no_model_call(isolated_sessions, monkeypatch):

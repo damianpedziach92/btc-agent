@@ -17,7 +17,7 @@ from database.models.agent_decision import AgentDecisionORM
 from database.models.paper import PaperOrderEventORM, PaperPendingOrderORM, PaperPositionORM
 from models.agent_decision import OpenProposal, PendingActionType, PendingOrderAction, TriggerCondition
 from models.market import Instrument, Timeframe
-from models.paper import CFD_FIXED_20_USD, FeeRates, PaperSide, RiskEngine, ZERO, dec, estimated_target_net_pnl
+from models.paper import CFD_FIXED_20_USD, MIN_NET_RISK_REWARD, FeeRates, PaperSide, RiskEngine, ZERO, dec, estimated_target_net_pnl, risk_reward_for_rates
 from services.paper_trading import MINUTE, PaperTradingService, iso_utc, require_utc, utc_now
 
 
@@ -89,13 +89,11 @@ class PendingOrderManager:
 
     def _event(self, row: PaperPendingOrderORM, type_: str, now: datetime,
                payload: dict, decision_id: UUID | None = None) -> None:
-        from services.telegram_notifications import TelegramConfig
-        notify = type_ in {"FILLED", "CANCELLED", "EXPIRED", "REJECTED_RISK_AT_TRIGGER", "MISSED"}
         self.session.execute(insert(PaperOrderEventORM).values(
             id=uuid4(), account_id=row.account_id, order_id=row.id,
             decision_id=decision_id, type=type_, event_time=now,
             payload=payload, dedupe_key=f"pending:{row.id}:{row.revision}:{type_}:{decision_id if type_ == 'HOLD' else ''}",
-            notification_status="PENDING" if notify and TelegramConfig.from_env() else "DISABLED",
+            notification_status="DISABLED",
             notification_attempts=0,
         ).on_conflict_do_nothing(constraint="uq_paper_order_event_dedupe"))
 
@@ -118,7 +116,23 @@ class PendingOrderManager:
         net = estimated_target_net_pnl(rates, side, entry, target, Decimal("1"), stop, 0)
         if net <= ZERO:
             return "Target has no positive executable net PnL"
+        rr = risk_reward_for_rates(rates, side, entry, stop, target, Decimal("1"))
+        if rr["rr_ratio"] is None or rr["rr_ratio"] < MIN_NET_RISK_REWARD:
+            return "INSUFFICIENT_RISK_REWARD"
         return None
+
+    def _reject_rr(self, account, decision_id: UUID, key: str, now: datetime,
+                   source: str, side: PaperSide, entry: Decimal, stop: Decimal,
+                   target: Decimal, rates: FeeRates) -> dict:
+        rr = risk_reward_for_rates(rates, side, entry, stop, target, Decimal("1"))
+        return self.paper._reject(account, key, "INSUFFICIENT_RISK_REWARD", now, decision_id, {
+            "code": "INSUFFICIENT_RISK_REWARD", "source": source,
+            "entry": str(entry), "SL": str(stop), "TP": str(target),
+            "quantity_btc": "1", "quantity_basis": "per_1_btc_preflight",
+            "risk_net_usd": str(rr["risk_net_usd"]), "reward_net_usd": str(rr["reward_net_usd"]),
+            "rr_ratio": str(rr["rr_ratio"]) if rr["rr_ratio"] is not None else None,
+            "min_rr": str(MIN_NET_RISK_REWARD), "fee_profile_version": rates.version,
+        })
 
     def _capacity_error(self, account, active: list[PaperPendingOrderORM], order_type: str,
                         entry: Decimal, stop: Decimal, target: Decimal, rates: FeeRates,
@@ -243,6 +257,10 @@ class PendingOrderManager:
             error = self._level_error(action.order_type.value, action.entry_level_usd,
                                       action.stop_loss, action.take_profit, current, rates)
             if error:
+                if error == "INSUFFICIENT_RISK_REWARD":
+                    return self._reject_rr(account, decision_id, f"{decision_id}:pending:{action_index}", now,
+                        "pending_create", order_side(action.order_type.value), action.entry_level_usd,
+                        action.stop_loss, action.take_profit, rates)
                 return {"status": "REJECTED", "reason": error}
             error = self._capacity_error(account, active, action.order_type.value,
                                          action.entry_level_usd, action.stop_loss, action.take_profit,
@@ -335,6 +353,9 @@ class PendingOrderManager:
             return {"status": "REJECTED", "reason": "Entry level exceeds configured distance from quote"}
         error = self._level_error(order_type, level, stop, target, current, rates)
         if error:
+            if error == "INSUFFICIENT_RISK_REWARD":
+                return self._reject_rr(account, decision_id, f"{decision_id}:pending-amend:{row.id}", now,
+                    "pending_amend", order_side(order_type), level, stop, target, rates)
             return {"status": "REJECTED", "reason": error}
         active = list(self.session.scalars(select(PaperPendingOrderORM).where(
             PaperPendingOrderORM.account_id == account.id,

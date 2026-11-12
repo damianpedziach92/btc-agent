@@ -51,7 +51,9 @@ def build_market_context(session: Session, as_of: datetime, ticker: dict | None 
     result = {"instrument": Instrument.BTC_USD.value, "as_of": as_of.isoformat(),
               "ticker": ticker, "timeframes": timeframes,
               "cost_model": {"execution_model": "CFD_FIXED_20_USD", "spread_usd_per_btc": "20",
-                             "trade_fee_rate": "0", "financing_rate": "0"}}
+                             "trade_fee_rate": "0", "financing_rate": "0",
+                             "min_net_risk_reward": "1.5",
+                             "rr_formula": "LONG: (TP-entry)/(entry-SL); SHORT: (entry-TP)/(SL-entry). Entry is executable CFD price; SL/TP are executable closing prices."}}
     payload = json.dumps(result, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     result["sha256"] = sha256(payload.encode("utf-8")).hexdigest()
     return result

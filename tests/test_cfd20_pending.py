@@ -14,7 +14,7 @@ from database.models.paper import PaperAccountLedgerORM, PaperPendingOrderORM, P
 from models.agent_decision import OpenProposal, PendingOrderAction, PendingInvalidation
 from models.market import Instrument, Timeframe
 from models.paper import (CFD_FIXED_20_USD, FeeRates, PaperSide, RiskConfig,
-                          barrier_touch, cfd20_rates, execution_price)
+                          barrier_touch, cfd20_rates, execution_price, calculate_risk_reward)
 from services.paper_trading import PaperTradingService
 from services.pending_orders import PendingOrderManager, evaluate_order_candle
 from services.market_context import build_market_context
@@ -91,6 +91,104 @@ def test_cfd20_fixed_spread_and_legacy_snapshot():
     assert FeeRates.from_dict(legacy).execution_model == "LEGACY_BPS"
 
 
+@pytest.mark.parametrize("side,entry,stop,bad_target,good_target", [
+    ("LONG", "73010", "72910", "73159", "73160"),
+    ("SHORT", "72990", "73090", "72841", "72840"),
+])
+def test_net_rr_149_rejected_150_accepted(paper, side, entry, stop, bad_target, good_target):
+    seed(paper)
+    at = T0 + timedelta(seconds=25)
+    mid = D("73000")
+    rejected = paper.open_position(OpenProposal(side=side, reason="test", stop_loss=D(stop),
+        take_profit=D(bad_target), valid_until=T0+timedelta(minutes=5)), mid, at,
+        execution_key=f"rr-bad:{side}", now=at)
+    assert rejected["status"] == "REJECTED"
+    assert rejected["code"] == "INSUFFICIENT_RISK_REWARD"
+    assert rejected["rr_ratio"] == "1.49"
+    accepted = paper.open_position(OpenProposal(side=side, reason="test", stop_loss=D(stop),
+        take_profit=D(good_target), valid_until=T0+timedelta(minutes=5)), mid, at,
+        execution_key=f"rr-good:{side}", now=at)
+    assert accepted["status"] == "ACCEPTED"
+    assert paper.session.get(PaperPositionORM, UUID(accepted["position_id"])).entry_price == D(entry)
+
+
+def test_short_regression_rr_rejected_without_changing_existing_position(paper):
+    seed(paper)
+    at = T0+timedelta(seconds=25)
+    result = paper.open_position(OpenProposal(side="SHORT", reason="old setup", stop_loss=D("73363.50"),
+        take_profit=D("72742.70"), valid_until=T0+timedelta(minutes=5)), D("72870.55"), at,
+        execution_key="old-short-regression", now=at)
+    assert result["code"] == "INSUFFICIENT_RISK_REWARD"
+    assert D(result["rr_ratio"]) < D("0.24")
+    assert paper.session.scalars(select(PaperPositionORM).where(
+        PaperPositionORM.account_id == paper._account().id)).all() == []
+
+
+def test_stop_gap_rechecks_rr_at_real_fill(paper):
+    seed(paper)
+    row = decision(paper)
+    manager = PendingOrderManager(paper.session, paper)
+    created = manager.apply_action(create_action("BUY_STOP", "73050", "72950", "73200"),
+                                   row.id, quote(), T0+timedelta(seconds=25))
+    assert created["status"] == "PENDING"
+    add_candle(paper.session, T0)
+    add_candle(paper.session, T0+timedelta(minutes=1), open_="73100", high="73120",
+               low="73090", close="73110")
+    assert manager.process(T0+timedelta(minutes=2, seconds=5))["filled"] == 0
+    order = paper.session.get(PaperPendingOrderORM, UUID(created["order_id"]))
+    assert order.status == "REJECTED"
+    assert "INSUFFICIENT_RISK_REWARD" in order.cancel_reason
+
+
+def test_pending_rr_preflight_rejects_149_and_amend_below_threshold(paper):
+    seed(paper)
+    row = decision(paper)
+    manager = PendingOrderManager(paper.session, paper)
+    bad = manager.apply_action(create_action("BUY_STOP", "73050", "72950", "73199"),
+                               row.id, quote(), T0+timedelta(seconds=25))
+    assert bad["code"] == "INSUFFICIENT_RISK_REWARD" and bad["rr_ratio"] == "1.49"
+    good = manager.apply_action(create_action("BUY_STOP", "73050", "72950", "73200"),
+                                row.id, quote(), T0+timedelta(seconds=25), action_index=1)
+    assert good["status"] == "PENDING"
+    order_id = UUID(good["order_id"])
+    amend = manager.apply_action(PendingOrderAction(action="AMEND", order_id=order_id,
+        expected_revision=1, take_profit=D("73199"), reason="too narrow"),
+        row.id, quote(), T0+timedelta(seconds=26))
+    assert amend["code"] == "INSUFFICIENT_RISK_REWARD"
+    order = paper.session.get(PaperPendingOrderORM, order_id)
+    assert order.revision == 1 and order.take_profit == D("73200")
+
+
+def test_rr_uses_executable_barriers_without_second_spread():
+    for side, entry, stop, target in ((PaperSide.LONG, D("73010"), D("72910"), D("73160")),
+                                      (PaperSide.SHORT, D("72990"), D("73090"), D("72840"))):
+        result = calculate_risk_reward(side, entry, stop, target, D("0.01"), D("0"), D("0"))
+        assert result["risk_net_usd"] == D("1")
+        assert result["reward_net_usd"] == D("1.5")
+        assert result["rr_ratio"] == D("1.5")
+
+
+def test_new_cfd_entry_requires_both_protective_levels(paper):
+    seed(paper)
+    at = T0+timedelta(seconds=25)
+    for index, (stop, target) in enumerate(((None, D("73200")), (D("72900"), None))):
+        result = paper.open_position(OpenProposal(side="LONG", reason="missing level",
+            stop_loss=stop, take_profit=target, valid_until=T0+timedelta(minutes=5)),
+            D("73000"), at, execution_key=f"missing-level:{index}", now=at)
+        assert result["status"] == "REJECTED"
+        assert result["code"] == "INSUFFICIENT_RISK_REWARD"
+
+
+def test_read_only_rr_preflight_tool():
+    from agents.market_tools import MarketTools
+    import json
+    result = json.loads(MarketTools().call("get_risk_reward", json.dumps({
+        "side": "SHORT", "entry_execution_price": "72990",
+        "stop_execution_price": "73090", "target_execution_price": "72840",
+    })))
+    assert result["rr_ratio"] == "1.5" and result["passes"] is True
+
+
 def test_cfd_barrier_touch_and_gap():
     rates = cfd20_rates()
     candle = SimpleNamespace(open=D("74000"), high=D("74105"), low=D("73900"))
@@ -110,9 +208,9 @@ def test_cfd_barrier_touch_and_gap():
 
 @pytest.mark.parametrize("order_type,level,sl,tp,bar,expected", [
     ("BUY_LIMIT", "72950", "72800", "73200", {"low": "72940"}, "72950"),
-    ("BUY_STOP", "73050", "72800", "73400", {"high": "73040"}, "73050"),
+    ("BUY_STOP", "73050", "72800", "73450", {"high": "73040"}, "73050"),
     ("SELL_LIMIT", "73050", "73200", "72800", {"high": "73060"}, "73050"),
-    ("SELL_STOP", "72950", "73200", "72600", {"low": "72960"}, "72950"),
+    ("SELL_STOP", "72950", "73200", "72550", {"low": "72960"}, "72950"),
 ])
 def test_pending_order_fill_is_future_idempotent_and_zero_fee(paper, order_type, level, sl, tp, bar, expected):
     seed(paper)
@@ -201,14 +299,14 @@ def test_market_context_excludes_future_candles_and_keeps_nulls(paper):
 
 
 @pytest.mark.parametrize("side,bar,reason,fill", [
-    ("LONG", {"open_": "73000", "high": "73110", "low": "72950"}, "TAKE_PROFIT", "73100"),
-    ("SHORT", {"open_": "73000", "high": "73050", "low": "72890"}, "TAKE_PROFIT", "72900"),
+    ("LONG", {"open_": "73000", "high": "73110", "low": "72970"}, "TAKE_PROFIT", "73100"),
+    ("SHORT", {"open_": "73000", "high": "73020", "low": "72890"}, "TAKE_PROFIT", "72900"),
     ("LONG", {"open_": "72800", "high": "73000", "low": "72750"}, "STOP_LOSS", "72790"),
     ("SHORT", {"open_": "73200", "high": "73250", "low": "73000"}, "STOP_LOSS", "73210"),
 ])
 def test_cfd_service_barrier_fill_uses_executable_side(paper, side, bar, reason, fill):
     seed(paper)
-    stop, target = (D("72900"), D("73100")) if side == "LONG" else (D("73100"), D("72900"))
+    stop, target = (D("72950"), D("73100")) if side == "LONG" else (D("73050"), D("72900"))
     proposal = OpenProposal(side=side, reason="test", stop_loss=stop, take_profit=target,
                             valid_until=T0+timedelta(minutes=5))
     opened = paper.open_position(proposal, D("73000"), T0,
@@ -295,17 +393,17 @@ def test_pending_amend_ignores_bar_started_before_update(paper):
 def test_pending_fill_notification_is_deduplicated(paper, monkeypatch):
     from sqlalchemy.orm import sessionmaker
     import services.telegram_notifications as notifications
+    import services.position_notifications as position_notifications
 
     seed(paper)
     row = decision(paper)
     manager = PendingOrderManager(paper.session, paper)
-    monkeypatch.setattr(notifications.TelegramConfig, "from_env", classmethod(lambda cls: object()))
     created = manager.apply_action(create_action("BUY_LIMIT", "72950", "72800", "73200"),
                                    row.id, quote(), T0+timedelta(seconds=25))
     add_candle(paper.session, T0)
     add_candle(paper.session, T0+timedelta(minutes=1), low="72940")
     assert manager.process(T0+timedelta(minutes=2, seconds=5))["filled"] == 1
-    monkeypatch.setattr(notifications, "SessionLocal", sessionmaker(
+    monkeypatch.setattr(position_notifications, "SessionLocal", sessionmaker(
         bind=paper.session.connection(), autoflush=False, expire_on_commit=False))
 
     class FakeClient:
@@ -316,9 +414,56 @@ def test_pending_fill_notification_is_deduplicated(paper, monkeypatch):
             self.messages.append(message)
 
     client = FakeClient()
-    assert notifications.process_pending_order_notifications(client=client)["sent"] == 1
+    assert position_notifications.process_position_notifications(client=client)["sent"] == 1
+    assert position_notifications.process_position_notifications(client=client)["sent"] == 0
+    assert "Źródło: ZLECENIE" in client.messages[0]
     assert notifications.process_pending_order_notifications(client=client)["sent"] == 0
-    assert created["order_id"] in client.messages[0]
+
+
+def test_position_alerts_retry_in_open_close_order(paper, monkeypatch):
+    from sqlalchemy.orm import sessionmaker
+    from database.models.position_notification import PaperPositionNotificationORM
+    from services.position_notifications import process_position_notifications
+    import services.position_notifications as position_notifications
+
+    seed(paper)
+    at = T0 + timedelta(seconds=25)
+    opened = paper.open_position(OpenProposal(side="LONG", reason="M15 pullback",
+        stop_loss=D("72900"), take_profit=D("73200"), valid_until=T0+timedelta(minutes=5)),
+        D("73000"), at, execution_key="alerts-open", now=at)
+    assert opened["status"] == "ACCEPTED"
+    closed = paper.close_position(UUID(opened["position_id"]), "AGENT", D("73100"),
+                                  T0+timedelta(minutes=1), source="test")
+    assert closed["status"] == "CLOSED"
+    monkeypatch.setattr(position_notifications, "SessionLocal", sessionmaker(
+        bind=paper.session.connection(), autoflush=False, expire_on_commit=False))
+
+    class FakeClient:
+        def __init__(self):
+            self.messages = []
+            self.fail = True
+
+        def send_message(self, message):
+            if self.fail:
+                self.fail = False
+                raise position_notifications.TelegramDeliveryError("Telegram HTTP 503")
+            self.messages.append(message)
+
+    client = FakeClient()
+    assert process_position_notifications(client=client)["failed"] == 1
+    assert client.messages == []
+    assert process_position_notifications(client=client)["sent"] == 2
+    assert process_position_notifications(client=client)["sent"] == 0
+    assert len(client.messages) == 2
+    assert "OTWARTA LONG" in client.messages[0]
+    assert "73 010,00 USD" in client.messages[0]
+    assert "Źródło: AGENT" in client.messages[0]
+    assert "ZAMKNIĘTA LONG" in client.messages[1]
+    assert "Powód: AGENT" in client.messages[1]
+    assert opened["position_id"][:8] in client.messages[0]
+    assert opened["position_id"][:8] in client.messages[1]
+    rows = paper.session.scalars(select(PaperPositionNotificationORM)).all()
+    assert len(rows) == 2 and all(row.status == "SENT" for row in rows)
 
 
 def test_reviewer_context_includes_order_create_and_fill(paper):

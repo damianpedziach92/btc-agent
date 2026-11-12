@@ -9,6 +9,7 @@ ONE = Decimal("1")
 BTC_STEP = Decimal("0.00000001")
 MONEY_STEP = Decimal("0.000000000001")
 CFD_SPREAD_USD_PER_BTC = Decimal("20")
+MIN_NET_RISK_REWARD = Decimal("1.5")
 CFD_FIXED_20_USD = "CFD_FIXED_20_USD"
 LEGACY_BPS = "LEGACY_BPS"
 
@@ -199,6 +200,37 @@ def barrier_touch(side: PaperSide, candle, stop_loss: Decimal | None,
 
 def gross_pnl(side: PaperSide, entry: Decimal, exit_price: Decimal, quantity: Decimal) -> Decimal:
     return (exit_price - entry if side is PaperSide.LONG else entry - exit_price) * quantity
+
+
+def calculate_risk_reward(
+    side: PaperSide, entry_execution_price: Decimal, stop_execution_price: Decimal,
+    target_execution_price: Decimal, quantity: Decimal, entry_costs: Decimal,
+    exit_costs: Decimal,
+) -> dict[str, Decimal | None]:
+    """Net R:R from executable prices; SL/TP already include the CFD spread."""
+    values = (entry_execution_price, stop_execution_price, target_execution_price,
+              quantity, entry_costs, exit_costs)
+    if any(not dec(value).is_finite() for value in values) or quantity <= ZERO:
+        raise ValueError("Risk/reward inputs must be finite and quantity positive")
+    stop_net = gross_pnl(side, entry_execution_price, stop_execution_price, quantity) - entry_costs - exit_costs
+    target_net = gross_pnl(side, entry_execution_price, target_execution_price, quantity) - entry_costs - exit_costs
+    risk = -stop_net
+    reward = target_net
+    valid_levels = (entry_execution_price > ZERO and stop_execution_price > ZERO and
+                    target_execution_price > ZERO and
+                    (stop_execution_price < entry_execution_price < target_execution_price
+                     if side is PaperSide.LONG else
+                     target_execution_price < entry_execution_price < stop_execution_price))
+    return {"risk_net_usd": risk, "reward_net_usd": reward,
+            "rr_ratio": reward / risk if valid_levels and risk > ZERO and reward > ZERO else None}
+
+
+def risk_reward_for_rates(rates: FeeRates, side: PaperSide, entry: Decimal,
+                          stop: Decimal, target: Decimal, quantity: Decimal) -> dict[str, Decimal | None]:
+    opening = entry_costs(rates, side, quantity, entry)[0]
+    # The higher closing fee is conservative for both outcomes. CFD20 has zero fees.
+    closing = quantity * max(stop, target) * rates.trade_exit_fee_rate
+    return calculate_risk_reward(side, entry, stop, target, quantity, opening, closing)
 
 
 def entry_costs(rates: FeeRates, side: PaperSide, quantity: Decimal, entry: Decimal) -> tuple[Decimal, dict]:

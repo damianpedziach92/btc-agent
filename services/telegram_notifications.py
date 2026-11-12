@@ -1,4 +1,7 @@
-"""Durable, read-only Telegram summaries for completed market analyses."""
+"""Telegram transport and retired decision/order notification readers.
+
+Only services.position_notifications may send production alerts.
+"""
 
 import json
 import logging
@@ -209,7 +212,8 @@ def format_decision_notification(
 
 
 def enqueue_decision_notification(session, decision_id: UUID, now: datetime | None = None) -> bool:
-    """Queue only decisions created while Telegram is configured."""
+    """Legacy decision alerts are disabled; position events own Telegram."""
+    return False
     if TelegramConfig.from_env() is None:
         return False
     session.execute(insert(TelegramNotificationORM).values(
@@ -221,6 +225,7 @@ def enqueue_decision_notification(session, decision_id: UUID, now: datetime | No
 
 
 def process_pending_notifications(limit: int = 3, client: TelegramBotClient | None = None) -> dict:
+    return {"sent": 0, "failed": 0, "pending": 0, "disabled": True}
     config = TelegramConfig.from_env()
     if config is None:
         return {"sent": 0, "failed": 0, "pending": 0, "disabled": True}
@@ -277,6 +282,7 @@ def process_pending_notifications(limit: int = 3, client: TelegramBotClient | No
 
 
 def process_pending_order_notifications(limit: int = 10, client: TelegramBotClient | None = None) -> dict:
+    return {"sent": 0, "failed": 0, "disabled": True}
     config = TelegramConfig.from_env()
     if config is None:
         return {"sent": 0, "failed": 0, "disabled": True}

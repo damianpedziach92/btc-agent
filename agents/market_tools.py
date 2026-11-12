@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Callable
 
 import httpx
@@ -11,6 +11,7 @@ from repositories.candle_repository import CandleRepository
 from services.indicators import calculate_indicator_history, MA_PERIODS
 from services.market_structure import calculate_market_structure
 from services.paper_trading import PaperTradingService
+from models.paper import MIN_NET_RISK_REWARD, PaperSide, calculate_risk_reward
 
 
 KRAKEN_TICKER_URL = "https://api.kraken.com/0/public/Ticker"
@@ -19,6 +20,18 @@ TIMEFRAMES = [timeframe.value for timeframe in Timeframe]
 MAX_HISTORY = 50
 
 TOOL_DEFINITIONS = [
+    {
+        "type": "function", "name": "get_risk_reward",
+        "description": "Read-only net R:R preflight for executable CFD20 entry, SL and TP prices. Prices already include CFD side; quantity is 1 BTC and fees are zero.",
+        "strict": True,
+        "parameters": {"type": "object", "properties": {
+            "side": {"type": "string", "enum": ["LONG", "SHORT"]},
+            "entry_execution_price": {"type": "string"},
+            "stop_execution_price": {"type": "string"},
+            "target_execution_price": {"type": "string"},
+        }, "required": ["side", "entry_execution_price", "stop_execution_price", "target_execution_price"],
+        "additionalProperties": False},
+    },
     {
         "type": "function",
         "name": "get_paper_account",
@@ -164,7 +177,22 @@ class MarketTools:
 
     def call(self, name: str, arguments: str) -> str:
         params = json.loads(arguments)
-        if name == "get_paper_account":
+        if name == "get_risk_reward":
+            side = PaperSide(params["side"])
+            try:
+                entry = Decimal(params["entry_execution_price"])
+                stop = Decimal(params["stop_execution_price"])
+                target = Decimal(params["target_execution_price"])
+            except InvalidOperation as exc:
+                raise ValueError("Risk/reward prices must be decimal strings") from exc
+            values = calculate_risk_reward(side, entry, stop, target, Decimal("1"), Decimal("0"), Decimal("0"))
+            result = {"execution_model": "CFD_FIXED_20_USD", "quantity_btc": "1",
+                      "risk_net_usd": str(values["risk_net_usd"]),
+                      "reward_net_usd": str(values["reward_net_usd"]),
+                      "rr_ratio": str(values["rr_ratio"]) if values["rr_ratio"] is not None else None,
+                      "min_rr": str(MIN_NET_RISK_REWARD),
+                      "passes": values["rr_ratio"] is not None and values["rr_ratio"] >= MIN_NET_RISK_REWARD}
+        elif name == "get_paper_account":
             result = self.get_paper_account()
         elif name == "get_open_positions":
             result = self.get_open_positions()

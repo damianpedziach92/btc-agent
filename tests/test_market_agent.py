@@ -83,7 +83,7 @@ class MarketAgentTests(unittest.TestCase):
             "output": '{"price":"74000"}',
         })
         self.assertEqual({tool["name"] for tool in TOOL_DEFINITIONS}, {
-            "get_price", "get_indicators", "get_candles", "get_paper_account", "get_open_positions"
+            "get_price", "get_indicators", "get_candles", "get_paper_account", "get_open_positions", "get_risk_reward"
         })
         self.assertEqual(analyst.tool_trace[0]["name"], "get_price")
         self.assertEqual(analyst.tool_trace[0]["result"]["price"], "74000")
@@ -160,7 +160,7 @@ class MarketAgentTests(unittest.TestCase):
             result = AgentDecision.model_validate(payload)
             self.assertEqual(result.decision.value, value)
         self.assertEqual({tool["name"] for tool in TOOL_DEFINITIONS}, {
-            "get_price", "get_indicators", "get_candles", "get_paper_account", "get_open_positions"
+            "get_price", "get_indicators", "get_candles", "get_paper_account", "get_open_positions", "get_risk_reward"
         })
 
     def test_invalid_contract_is_rejected(self):

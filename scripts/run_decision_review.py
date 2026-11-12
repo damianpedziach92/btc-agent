@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from openai import OpenAIError, RateLimitError
 
 from services.decision_review import run_decision_review
-from services.review_notifications import process_pending_review_notifications
 
 
 def main() -> None:
@@ -49,8 +48,6 @@ def main() -> None:
     except (RuntimeError, ValueError, OpenAIError) as exc:
         parser.exit(1, f"{exc}\n")
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    if result["status"] in {"CREATED", "BACKFILL"} and not args.preview:
-        print(json.dumps({"telegram": process_pending_review_notifications()}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

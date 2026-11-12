@@ -18,11 +18,10 @@ from services.paper_trading import PaperTradingService
 from services.pending_orders import PendingOrderManager
 from services.market_context import build_market_context
 from agents.market_analyst import INSTRUCTIONS_HASH
-from services.telegram_notifications import enqueue_decision_notification, process_pending_notifications
 
 
 DEFAULT_MODEL = "gpt-6-luna"
-MAX_CANDLE_AGE = timedelta(minutes=5)
+MAX_CANDLE_AGE = timedelta(minutes=2)
 
 
 def run_market_analysis(force: bool = False, preview: bool = False) -> AgentDecision | None:
@@ -34,13 +33,14 @@ def run_market_analysis(force: bool = False, preview: bool = False) -> AgentDeci
     instrument = Instrument.BTC_USD
     with SessionLocal() as session:
         latest = CandleRepository(session).get_latest(
-            instrument, Timeframe.FIFTEEN_MINUTES, 1
+            instrument, Timeframe.FIVE_MINUTES, 1
         )
         if not latest:
             return None
         candle_timestamp = latest[0].timestamp
-        candle_end = candle_timestamp.astimezone(timezone.utc) + timedelta(minutes=15)
-        if not (force or preview) and not timedelta(0) <= datetime.now(timezone.utc) - candle_end <= MAX_CANDLE_AGE:
+        candle_end = candle_timestamp.astimezone(timezone.utc) + timedelta(minutes=5)
+        candle_age = datetime.now(timezone.utc) - candle_end
+        if candle_age < timedelta(0) or (not (force or preview) and candle_age > MAX_CANDLE_AGE):
             return None
         memory = AgentMemoryRepository(session)
         if not preview and memory.exists(instrument, candle_timestamp):
@@ -77,7 +77,13 @@ def run_market_analysis(force: bool = False, preview: bool = False) -> AgentDeci
             instrument, candle_timestamp, analyst.last_model, decision, active,
             analysis_trace={"paper_context": paper_context, "market_context": market_context,
                             "market_context_sha256": market_context["sha256"],
+                            "trigger_timeframe": Timeframe.FIVE_MINUTES.value,
+                            "trigger_candle_end": candle_end.isoformat(),
                             "instructions_hash": INSTRUCTIONS_HASH,
+                            "input_chars": analyst.input_chars,
+                            "token_usage": analyst.token_usage,
+                            "tool_budget_exceeded": any(call.get("status") == "BUDGET_EXCEEDED"
+                                                        for call in analyst.tool_trace),
                             "tool_calls": analyst.tool_trace},
         )
         if saved:
@@ -87,8 +93,6 @@ def run_market_analysis(force: bool = False, preview: bool = False) -> AgentDeci
             ))
             if decision_id is None:
                 raise RuntimeError("Saved agent decision could not be reloaded")
-            enqueue_decision_notification(session, decision_id)
     if saved:
         process_pending_decisions()
-        process_pending_notifications()
     return decision if saved else None

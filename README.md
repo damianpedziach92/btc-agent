@@ -1,6 +1,6 @@
 # BTC agent — Kraken data, PAPER CFD20
 
-The collector imports closed Kraken BTC/USD 1m candles each minute and aggregates 5m, 15m, 1h, 4h and 1d. MA50/100/200, Bollinger Bands, ATR and market structure are available to the market analyst. The analyst runs every 15 minutes and the read-only decision reviewer checks completed two-hour UTC windows. No broker orders, private exchange endpoints or live trading keys are used.
+The collector imports closed Kraken BTC/USD 1m candles each minute and aggregates 5m, 15m, 1h, 4h and 1d. MA50/100/200, Bollinger Bands, ATR and market structure are available to the market analyst. The analyst runs every 5 minutes after a completed M5; the read-only decision reviewer checks completed two-hour UTC windows. No broker orders, private exchange endpoints or live trading keys are used.
 
 ## PAPER CFD20
 
@@ -11,11 +11,11 @@ The account is versioned in `paper_fee_profiles`. New positions require the acti
 SL and TP levels are **executable closing-side CFD prices**. LONG closes at simulated bid (`mid - 10`), SHORT at simulated ask (`mid + 10`). Closed M1 high/low determines whether a barrier was touched. Both barriers in one minute mean SL first. A worse opening price after an SL gap is used and marked `GAP_FILL_ASSUMPTION`; ordinary touch fills at the exact barrier. Historical legacy positions keep their legacy barrier interpretation. OHLC cannot reveal intrabar order or real liquidity, so fills and PnL are estimates.
 
 Risk sizing uses the same executable exit convention as post-entry equity checks. The configured risk and margin limits, fresh M1 feed, structural M15 stop and opposing-position prohibition remain in force. `.env.example` documents the limits. `PAPER_MAX_TOTAL_MARGIN=0.90` and `PAPER_MIN_FREE_MARGIN=0.05` permit substantial exposure even at 1×.
-Two experimental filters are opt-in: `PAPER_EXPERIMENTAL_MIN_RR_AFTER_COSTS` and `PAPER_EXPERIMENTAL_MAX_CHASE_ATR`. Both default to zero, so the current trading policy is not silently tightened. Compare them in replay before enabling.
+Every new CFD20 entry requires executable net reward/risk of at least **1.5**, checked again at actual fill. SL and TP are required. Rejections include `INSUFFICIENT_RISK_REWARD` diagnostics; existing positions are unchanged. `PAPER_EXPERIMENTAL_MIN_RR_AFTER_COSTS` can tighten the threshold further; `PAPER_EXPERIMENTAL_MAX_CHASE_ATR` is optional. Both default to zero.
 
 ## Pending orders
 
-Every 15-minute analysis can issue structured `pending_order_actions`: CREATE, AMEND, CANCEL or HOLD. The minute collector evaluates saved orders on **complete M1** after processing existing positions' SL/TP. The agent is not called each minute. `to_monitor` is informational and cannot execute a trade.
+Every 5-minute analysis can issue structured `pending_order_actions`: CREATE, AMEND, CANCEL or HOLD. The minute collector evaluates saved orders on **complete M1** after processing existing positions' SL/TP. The agent is not called each minute. `to_monitor` is informational and cannot execute a trade.
 
 | Order | Executable CFD trigger | Meaning |
 | --- | --- | --- |
@@ -27,11 +27,13 @@ Every 15-minute analysis can issue structured `pending_order_actions`: CREATE, A
 Orders cannot fill at CREATE. The first eligible candle must start at or after the order's creation or last amendment minute boundary. LIMIT fills at its level or a better candle open. STOP fills at its trigger or a worse candle open after a gap. Order size is computed at fill using the same PAPER risk engine. Up to three active orders are allowed, with one per scenario and no opposing pending sides. CREATE does not reserve cash; potential exposure is checked, and all limits are checked again at fill. Default maximum TTL is 60 minutes. An expired order cannot fill even if a later candle crosses its level. Processing is idempotent by execution key. A data gap is never inferred as a trigger. A fill starts SL/TP protection from the next complete M1, because the intrabar path is unknown.
 An optional machine-checkable `invalidating_condition` can cancel the order when a closed candle crosses a specified level; the condition is evaluated before a trigger in the same bar. Free-form text never cancels or fills an order.
 
-The agent receives active order IDs and revisions. AMEND/CANCEL/HOLD require the exact ID and revision; a filled order cannot be amended. Order events are stored in `paper_order_events`, and Telegram sends separate notifications for FILL, CANCEL, EXPIRE and risk rejection when configured. `.venv/bin/python -m scripts.show_paper_account` prints active and recent orders, cash, equity, positions and execution model.
+The agent receives active order IDs and revisions. AMEND/CANCEL/HOLD require the exact ID and revision; a filled order cannot be amended. Order events are stored in `paper_order_events`. Telegram sends one OPENED alert when an order fills and no alert for CREATE, AMEND, CANCEL or EXPIRE. `.venv/bin/python -m scripts.show_paper_account` prints active and recent orders, cash, equity, positions and execution model.
 
 ## Market agent and reviewer
 
-The analyst considers H1 context, M15 setup, M5 confirmation and M1 timing. Read-only tools return latest price, candles, indicators, PAPER account and positions. Decisions, tool trace, proposals, position actions and pending order actions are saved to `agent_decisions`. The reviewer evaluates every action with historical closed candles, execution results and costs. Large contexts are compacted per action and processed in bounded batches; saved metadata includes `batch_count`, `covered_action_ids` and removed redundant fields. A failed batch does not save a partial review.
+The analyst considers H1 context, M15 setup, M5 confirmation and M1 timing. Read-only tools return latest price, candles, indicators, PAPER account, positions and a net R:R preflight calculator. Decisions, tool trace, proposals, position actions and pending order actions are saved to `agent_decisions`. For new decisions, `candle_timestamp` means the start of the triggering closed M5; `analysis_trace.trigger_timeframe`, `trigger_candle_end`, input size and token usage record the new cadence. Older decisions keep their M15 interpretation. The existing unique `(instrument, candle_timestamp)` key prevents a duplicate when an old M15 and new M5 start share a timestamp. The reviewer evaluates every action with historical closed candles, execution results and costs. Large contexts are compacted per action and processed in bounded batches; saved metadata includes `batch_count`, `covered_action_ids` and removed redundant fields. A failed batch does not save a partial review.
+
+Telegram uses only the transactional `paper_position_notifications` outbox for actual OPENED and CLOSED events, including automatic TP/SL between analyses. Messages contain the saved execution price, net PnL on close, short position ID and source. No WAIT, decision summary, pending order status or reviewer report is sent. The migration marks older queued reports `DISABLED` without deleting them.
 
 ```bash
 .venv/bin/python -m scripts.run_market_agent --check-tools
@@ -68,6 +70,6 @@ python3 -m venv .venv
 systemctl --user restart btc-agent-scheduler.service
 ```
 
-Set `DATABASE_URL`, `OPENAI_API_KEY` and optional `OPENAI_MODEL` in `.env`; the default model is `gpt-6-luna`. `DECISION_REVIEW_MODEL` can override it for the reviewer. Telegram needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. The notification outbox retries failed sends. Do not commit `.env`. A detailed backup, migration, readback and rollback procedure is in [docs/CFD20_RUNBOOK.md](docs/CFD20_RUNBOOK.md).
+Set `DATABASE_URL`, `OPENAI_API_KEY` and optional `OPENAI_MODEL` in `.env`; the default model is `gpt-6-luna`. `DECISION_REVIEW_MODEL` can override it for the reviewer. Telegram needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. The position outbox retries failed sends. Do not commit `.env`. The current deployment procedure is in [docs/RR15_M5_TELEGRAM_RUNBOOK.md](docs/RR15_M5_TELEGRAM_RUNBOOK.md); the original CFD20 activation procedure is in [docs/CFD20_RUNBOOK.md](docs/CFD20_RUNBOOK.md).
 
 For isolated PostgreSQL test runs, use a separate database or schema with its own `DATABASE_URL`, apply Alembic there, then run `.venv/bin/python -m pytest -q`. Integration tests use real transactions; they do not contact a trading API.

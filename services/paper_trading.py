@@ -12,11 +12,13 @@ from database.models.paper import (
     PaperAccountLedgerORM, PaperAccountORM, PaperFeeProfileORM,
     PaperFundingRateORM, PaperPositionEventORM, PaperPositionORM, PaperPendingOrderORM,
 )
+from database.models.position_notification import PaperPositionNotificationORM
 from models.agent_decision import AgentDecision, OpenProposal, PositionActionType, TriggerCondition
 from models.market import Instrument, Timeframe
 from models.paper import (
-    ZERO, BTC_STEP, CFD_FIXED_20_USD, CFD_SPREAD_USD_PER_BTC, FeeRates, MarketType, PaperSide, RiskConfig, RiskEngine,
+    ZERO, BTC_STEP, CFD_FIXED_20_USD, CFD_SPREAD_USD_PER_BTC, MIN_NET_RISK_REWARD, FeeRates, MarketType, PaperSide, RiskConfig, RiskEngine,
     barrier_touch, dec, entry_costs, estimated_target_net_pnl, execution_price, funding_cost, gross_pnl, money, rollover_cost,
+    risk_reward_for_rates,
 )
 from repositories.candle_repository import CandleRepository
 from services.market_structure import calculate_market_structure
@@ -159,11 +161,18 @@ class PaperTradingService:
     def _event(self, account_id: UUID, type_: str, key: str, payload: dict,
                now: datetime, position_id: UUID | None = None,
                decision_id: UUID | None = None) -> None:
-        self.session.execute(insert(PaperPositionEventORM).values(
-            id=uuid4(), account_id=account_id, position_id=position_id,
+        event_id = uuid4()
+        inserted = self.session.execute(insert(PaperPositionEventORM).values(
+            id=event_id, account_id=account_id, position_id=position_id,
             decision_id=decision_id, type=type_, event_time=now,
             payload=payload, dedupe_key=key,
-        ).on_conflict_do_nothing(constraint="uq_paper_position_event_dedupe"))
+        ).on_conflict_do_nothing(constraint="uq_paper_position_event_dedupe")
+          .returning(PaperPositionEventORM.id)).scalar()
+        if inserted is not None and type_ in {"OPENED", "CLOSED"}:
+            self.session.add(PaperPositionNotificationORM(
+                event_id=inserted, status="PENDING", created_at=utc_now(),
+                sent_at=None, attempts=0, last_error=None,
+            ))
 
     def _ledger(self, account: PaperAccountORM, type_: str, key: str,
                 cash_delta: Decimal, margin_delta: Decimal, now: datetime,
@@ -366,11 +375,12 @@ class PaperTradingService:
         } for row in rows]
 
     def _reject(self, account: PaperAccountORM, key: str, reason: str,
-                now: datetime, decision_id: UUID | None = None) -> dict:
+                now: datetime, decision_id: UUID | None = None,
+                diagnostics: dict | None = None) -> dict:
         self._event(account.id, "REJECTED", f"reject:{key}",
-                    {"reason": reason, "execution_key": key}, now,
+                    {"reason": reason, "execution_key": key, **(diagnostics or {})}, now,
                     decision_id=decision_id)
-        return {"status": "REJECTED", "reason": reason}
+        return {"status": "REJECTED", "reason": reason, **(diagnostics or {})}
 
     def propose_open(
         self, proposal: OpenProposal, mark_price: Decimal, price_at: datetime,
@@ -492,7 +502,7 @@ class PaperTradingService:
         rejected = self.session.scalar(select(PaperPositionEventORM).where(
             PaperPositionEventORM.dedupe_key == f"reject:{execution_key}"))
         if rejected:
-            return {"status": "REJECTED", "reason": rejected.payload["reason"]}
+            return {"status": "REJECTED", **rejected.payload}
         if account.status != "ACTIVE":
             return self._reject(account, execution_key, "Paper account is not ACTIVE", now, decision_id)
         if mark_price <= ZERO:
@@ -535,6 +545,13 @@ class PaperTradingService:
         quote_mid = (dec(bid_price) + dec(ask_price)) / 2 if bid_price is not None and ask_price is not None else mark_price
         entry = money(execution_price(mark_price, side, True, rates,
                                       bid=bid_price, ask=ask_price))
+        if not self._allow_legacy_test_entries or rates.execution_model == CFD_FIXED_20_USD:
+            if proposal.stop_loss is None or proposal.take_profit is None:
+                return self._reject(account, execution_key, "INSUFFICIENT_RISK_REWARD", now, decision_id,
+                                    {"code": "INSUFFICIENT_RISK_REWARD", "source": source,
+                                     "entry": str(entry), "SL": str(proposal.stop_loss),
+                                     "TP": str(proposal.take_profit), "min_rr": str(MIN_NET_RISK_REWARD),
+                                     "fee_profile_version": rates.version})
         if decision_id is not None and rates.execution_model == CFD_FIXED_20_USD:
             trigger_error = self.validate_entry_trigger(proposal, side, entry, decision, rates)
             if trigger_error:
@@ -570,6 +587,16 @@ class PaperTradingService:
         )
         if quantity is None:
             return self._reject(account, execution_key, reason, now, decision_id)
+        if not self._allow_legacy_test_entries or rates.execution_model == CFD_FIXED_20_USD:
+            rr = risk_reward_for_rates(rates, side, entry, proposal.stop_loss, proposal.take_profit, quantity)
+            if rr["rr_ratio"] is None or rr["rr_ratio"] < MIN_NET_RISK_REWARD:
+                diagnostics = {"code": "INSUFFICIENT_RISK_REWARD", "source": source,
+                    "entry": str(entry), "SL": str(proposal.stop_loss), "TP": str(proposal.take_profit),
+                    "quantity_btc": str(quantity), "risk_net_usd": str(rr["risk_net_usd"]),
+                    "reward_net_usd": str(rr["reward_net_usd"]),
+                    "rr_ratio": str(rr["rr_ratio"]) if rr["rr_ratio"] is not None else None,
+                    "min_rr": str(MIN_NET_RISK_REWARD), "fee_profile_version": rates.version}
+                return self._reject(account, execution_key, "INSUFFICIENT_RISK_REWARD", now, decision_id, diagnostics)
         immediate_exit = execution_price(quote_mid, side, False, rates)
         single_limit = self.risk.no_sl_max_margin if proposal.stop_loss is None else self.risk.max_position_margin
         for _ in range(100):

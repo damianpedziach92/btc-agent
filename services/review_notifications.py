@@ -1,4 +1,4 @@
-"""Telegram outbox for two-hour decision reviews."""
+"""Retired Telegram formatting for stored reviews; delivery is disabled."""
 
 import logging
 from datetime import datetime, timezone
@@ -64,6 +64,7 @@ def format_review_notification(row: DecisionReviewORM) -> str:
 def process_pending_review_notifications(
     limit: int = 3, client: TelegramBotClient | None = None,
 ) -> dict:
+    return {"sent": 0, "failed": 0, "disabled": True}
     config = TelegramConfig.from_env()
     if config is None and client is None:
         return {"sent": 0, "failed": 0, "disabled": True}

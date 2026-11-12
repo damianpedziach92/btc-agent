@@ -8,3 +8,4 @@ backups/
 *.dump
 docs/*
 !docs/CFD20_RUNBOOK.md
+!docs/RR15_M5_TELEGRAM_RUNBOOK.md
