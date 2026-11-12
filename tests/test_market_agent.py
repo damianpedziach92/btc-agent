@@ -206,6 +206,29 @@ class MarketAgentTests(unittest.TestCase):
             with self.subTest(response=response), self.assertRaises((RuntimeError, ValidationError)):
                 MarketAnalyst(client, FakeTools(), "test-model").analyze()
 
+    def test_invalid_structured_answer_gets_one_tool_free_repair(self):
+        class RepairResponses:
+            def __init__(self):
+                self.requests = []
+
+            def create(self, **kwargs):
+                self.requests.append(kwargs)
+                if len(self.requests) == 1:
+                    return SimpleNamespace(output=[], output_text=json.dumps({
+                        "decision": "BUY", "open_proposal": None,
+                        "position_actions": [], "pending_order_actions": [],
+                        "to_monitor": [], "text": "Niespójna decyzja"}))
+                return SimpleNamespace(output=[], output_text=DECISION_JSON)
+
+        responses = RepairResponses()
+        analyst = MarketAnalyst(SimpleNamespace(responses=responses), FakeTools(), "test-model")
+        result = analyst.analyze()
+        self.assertEqual(result.decision, Decision.WAIT)
+        self.assertEqual(analyst.validation_repair_count, 1)
+        self.assertEqual(len(responses.requests), 2)
+        self.assertEqual(responses.requests[1]["tool_choice"], "none")
+        self.assertIn("open proposal", responses.requests[1]["input"][-1]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()

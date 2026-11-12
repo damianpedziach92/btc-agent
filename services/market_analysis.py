@@ -117,6 +117,7 @@ def run_market_analysis(force: bool = False, preview: bool = False) -> AgentDeci
                             "token_usage": analyst.token_usage,
                             "tool_budget_exceeded": any(call.get("status") == "BUDGET_EXCEEDED"
                                                         for call in analyst.tool_trace),
+                            "validation_repair_count": analyst.validation_repair_count,
                             "tool_calls": analyst.tool_trace},
         )
         if saved:

@@ -238,6 +238,7 @@ class MarketAnalyst:
         self.tools = tools
         self.model = model
         self.last_model = model
+        self.validation_repair_count = 0
 
     def analyze(self, active_monitors: list[ActiveMonitor] | None = None,
                 paper_context: dict | None = None,
@@ -276,6 +277,7 @@ class MarketAnalyst:
         self.tool_trace = []
         self.input_chars = len(input_items[0]["content"])
         self.token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        self.validation_repair_count = 0
         final_only = False
 
         for round_number in range(MAX_ROUNDS):
@@ -323,8 +325,20 @@ class MarketAnalyst:
                     raise RuntimeError("Model did not return a decision")
                 try:
                     return AgentDecision.model_validate_json(raw)
-                except ValidationError:
-                    raise RuntimeError("Model returned an invalid structured decision") from None
+                except ValidationError as exc:
+                    errors = [f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+                              for error in exc.errors(include_url=False)[:5]]
+                    logger.warning("Invalid analyst decision: %s", errors)
+                    if self.validation_repair_count or round_number == MAX_ROUNDS - 1:
+                        raise RuntimeError("Model returned an invalid structured decision: " +
+                                           "; ".join(errors)) from None
+                    self.validation_repair_count = 1
+                    final_only = True
+                    input_items.append({"role": "user", "content":
+                        "Popraw poprzednią odpowiedź zgodnie ze schematem i walidacją. "
+                        "Zachowaj decyzję tylko jeśli jest nadal spójna; w innym przypadku zwróć WAIT. "
+                        "Błędy: " + "; ".join(errors)})
+                    continue
 
             for call in calls:
                 try:
