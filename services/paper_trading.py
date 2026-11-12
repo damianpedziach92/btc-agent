@@ -619,11 +619,12 @@ class PaperTradingService:
             trigger_error = self.validate_entry_trigger(proposal, side, entry, decision, rates)
             if trigger_error:
                 return self._reject(account, execution_key, trigger_error, now, decision_id)
-        stop_error = self.validate_stop_structure(side, entry, proposal.stop_loss, price_at,
+        structure_at = price_at - MINUTE if pending_fill else price_at
+        stop_error = self.validate_stop_structure(side, entry, proposal.stop_loss, structure_at,
                                                   strategy, proposal.invalidation_level)
         if stop_error:
             return self._reject(account, execution_key, stop_error, now, decision_id)
-        chase_error = self.validate_chase(side, entry, price_at, strategy)
+        chase_error = self.validate_chase(side, entry, structure_at, strategy)
         if chase_error:
             return self._reject(account, execution_key, chase_error, now, decision_id)
         reserved = sum((p.reserved_margin for p in positions), ZERO)

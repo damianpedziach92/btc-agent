@@ -185,13 +185,19 @@ def test_scalp_pending_create_amend_fill_keeps_strategy_and_rr():
         fresh_quote = {**quote, "retrieved_at": (AT+timedelta(minutes=1, seconds=25)).isoformat()}
         assert manager.apply_action(amend, decision2.id, fresh_quote,
                                     AT+timedelta(minutes=1, seconds=25))["status"] == "PENDING"
-        for minute, low in ((0, "71999"), (1, "71999"), (2, "71960"), (3, "71999")):
+        # This M5 closes at the same instant as the triggering M1. Its future
+        # extreme must not alter the stop check for the earlier intrabar touch.
+        session.add(CandleORM(symbol=Instrument.BTC_USD, timeframe=Timeframe.FIVE_MINUTES,
+            timestamp=AT, open=D("72000"), high=D("80000"), low=D("70000"),
+            close=D("72000"), vwap=D("72000"), volume=D("1"), trades=1))
+        for minute, low in ((0, "71999"), (1, "71999"), (2, "71999"),
+                            (3, "71999"), (4, "71960")):
             at = AT+timedelta(minutes=minute)
             session.add(CandleORM(symbol=Instrument.BTC_USD, timeframe=Timeframe.ONE_MINUTE,
                 timestamp=at, open=D("72000"), high=D("72001"), low=D(low),
                 close=D("72000"), vwap=D("72000"), volume=D("1"), trades=1))
         session.flush()
-        assert manager.process(AT+timedelta(minutes=4, seconds=5))["filled"] == 1
+        assert manager.process(AT+timedelta(minutes=5, seconds=5))["filled"] == 1
         assert order.status == "FILLED" and D(order.trigger_trace["rr_ratio"]) >= D("1.5")
         position = session.get(PaperPositionORM, order.position_id)
         assert position.strategy == "SCALP_M5"
