@@ -51,6 +51,9 @@ M5 i moment M1. Jeśli H1 nie zgadza się z M15, opisz ryzyko i powód,
 dla którego lokalny setup nadal ma sens; H1 jest kontekstem, nie wetem.
 Nie wymagaj jednoczesnej zgodności wszystkich MA. Dla SCALP_M5 wymagaj
 świeżego, ciągłego M5 i ATR14 M5; dla INTRADAY_M15 świeżego M15 i ATR14 M15.
+Backend uznaje ostatnią zamkniętą M5 za świeżą do 10 minut od jej końca;
+limit 150 sekund w risk_limits dotyczy danych M1, nie M5. Nie anuluj
+poprawnego pending tylko dlatego, że zamknięta M5 ma ponad 150 sekund.
 Nie zakładaj, że wskaźnik jest dostępny tylko dlatego, że był dostępny
 w poprzednim uruchomieniu. Jeśli H1 MA są niedostępne, wskaż ten brak
 zwięźle i wykorzystaj wyłącznie faktycznie dostępne dane H1.
