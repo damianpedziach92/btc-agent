@@ -127,11 +127,9 @@ class PendingOrderManager:
     def _invalidation_level_error(side: PaperSide, stop: Decimal, condition) -> str | None:
         if condition is None:
             return None
-        if side is PaperSide.LONG and (condition.operator is not TriggerCondition.CLOSE_BELOW or
-                                       stop > condition.level):
+        if side is PaperSide.LONG and condition.operator is TriggerCondition.CLOSE_BELOW and stop > condition.level:
             return "INVALID_SL_STRUCTURE: LONG stop must protect CLOSE_BELOW invalidation"
-        if side is PaperSide.SHORT and (condition.operator is not TriggerCondition.CLOSE_ABOVE or
-                                        stop < condition.level):
+        if side is PaperSide.SHORT and condition.operator is TriggerCondition.CLOSE_ABOVE and stop < condition.level:
             return "INVALID_SL_STRUCTURE: SHORT stop must protect CLOSE_ABOVE invalidation"
         return None
 

@@ -9,6 +9,7 @@ from database.models.candle import CandleORM
 from database.models.agent_decision import AgentDecisionORM
 from database.models.paper import PaperPendingOrderORM, PaperPositionORM
 from models.agent_decision import AgentDecision, OpenProposal, PendingOrderAction
+from models.agent_decision import PendingInvalidation
 from models.market import Instrument, Timeframe
 from models.paper import PaperSide, RiskConfig, RiskEngine, ZERO, cfd20_rates, risk_reward_for_rates
 from models.strategy import Strategy, validate_strategy_setup
@@ -125,6 +126,15 @@ def test_pending_limit_has_its_own_structural_stop_and_rr():
     assert D(candidate["pending_stop_loss"]).as_tuple().exponent == -2
     assert _protective_cent(D("71918.28949790476461000412816"), PaperSide.SHORT) == D("71918.29")
     assert _protective_cent(D("71143.400000000001"), PaperSide.LONG) == D("71143.40")
+
+
+def test_pending_opportunity_cancel_condition_is_distinct_from_stop_invalidation():
+    condition = PendingInvalidation(timeframe="5m", operator="CLOSE_BELOW", level=D("71133.4"))
+    assert PendingOrderManager._invalidation_level_error(
+        PaperSide.SHORT, D("71753.65"), condition) is None
+    protective = PendingInvalidation(timeframe="5m", operator="CLOSE_ABOVE", level=D("71800"))
+    assert "INVALID_SL_STRUCTURE" in PendingOrderManager._invalidation_level_error(
+        PaperSide.SHORT, D("71753.65"), protective)
 
 
 def test_scalp_pending_create_amend_fill_keeps_strategy_and_rr():
