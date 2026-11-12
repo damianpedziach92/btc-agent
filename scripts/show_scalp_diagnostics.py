@@ -27,9 +27,13 @@ def main() -> None:
         rows = list(session.scalars(statement))
     decisions = Counter(row.decision for row in rows)
     scalp_rejections = Counter()
+    backend_rejections = Counter()
     pending_eligible = submitted_m15 = submitted_m5 = 0
     diagnosed = 0
     for row in rows:
+        for result in (row.paper_result or {}).get("results", []):
+            if result.get("status") == "REJECTED":
+                backend_rejections[str(result.get("reason", "UNKNOWN")).split(":", 1)[0]] += 1
         info = (row.analysis_trace or {}).get("strategy_diagnostics") or {}
         if not info:
             continue
@@ -42,6 +46,7 @@ def main() -> None:
     print(json.dumps({"decisions": len(rows), "by_decision": dict(decisions),
                       "wait_ratio": decisions["WAIT"]/len(rows) if rows else None,
                       "diagnosed": diagnosed, "scalp_m5_rejections": dict(scalp_rejections),
+                      "backend_rejections": dict(backend_rejections),
                       "scalp_m5_pending_eligible": pending_eligible,
                       "submitted_pending": {"INTRADAY_M15": submitted_m15,
                                             "SCALP_M5": submitted_m5}}, ensure_ascii=False, indent=2))

@@ -35,6 +35,9 @@ and produce its own replay report; the deployed default remains 1%.
    pending creations/fills and rejection codes with the preceding five.
    Do not infer an edge from a handful of decisions.
 
+Use `python -m scripts.show_scalp_diagnostics --since 2026-11-12T15:25:00Z`
+for read-only candidate and backend rejection counts.
+
 The migration is additive. Before new writes, a schema downgrade can remove
 the new nullable columns. After new writes, preserve a fresh backup and fix
 forward so the append-only ledger and new strategy snapshots remain intact.
