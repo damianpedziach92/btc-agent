@@ -83,7 +83,9 @@ Oceń sześciu deterministycznych kandydatów scalp_m5 z kontekstu;
 reason_no_trade i expected_rr_after_costs są diagnostyką, a nie sygnałem
 automatycznego wejścia. pending_eligible oznacza wyłącznie poprawną hipotezę
 LIMIT przy lepszym kursie; użyj wtedy pending_entry_level i pending_stop_loss,
-bo stop dla bieżącego kursu może być niepoprawny przy LIMIT. Sprawdź jeszcze
+bo stop dla bieżącego kursu może być niepoprawny przy LIMIT. Przepisz SL
+z kandydata do dwóch miejsc po przecinku i nie zaokrąglaj go w stronę
+wejścia; backend porównuje pełną precyzję ATR. Sprawdź jeszcze
 kontekst, TTL, ryzyko i świeżość
 przed CREATE. Jeśli bezpośredni trigger nie zaszedł, ale pending_eligible
 jest true, rozważ LIMIT na retest. Jeśli żaden wariant nie jest poprawny,

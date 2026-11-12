@@ -3,7 +3,7 @@
 Candidates are research observations. They never execute orders by themselves.
 """
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 from models.paper import MIN_NET_RISK_REWARD, PaperSide, cfd20_rates, risk_reward_for_rates
 from models.strategy import SCALP_PARAMETERS_V1, ScalpSetup, Strategy
@@ -11,6 +11,12 @@ from models.strategy import SCALP_PARAMETERS_V1, ScalpSetup, Strategy
 
 def _d(value):
     return Decimal(str(value)) if value is not None else None
+
+
+def _protective_cent(value: Decimal, side: PaperSide) -> Decimal:
+    """Round a stop away from entry so model decimal truncation cannot tighten it."""
+    return value.quantize(Decimal("0.01"), rounding=(ROUND_FLOOR if side is PaperSide.LONG
+                                                     else ROUND_CEILING))
 
 
 def build_scalp_candidates(context: dict) -> dict:
@@ -60,8 +66,9 @@ def build_scalp_candidates(context: dict) -> dict:
                 # Levels are executable CFD prices; the reference entry is the
                 # last closed midpoint plus the opening half-spread.
                 entry = close + (Decimal("10") if side is PaperSide.LONG else Decimal("-10"))
-                stop = (min(invalidation, entry-atr*minimum) if side is PaperSide.LONG else
-                        max(invalidation, entry+atr*minimum))
+                stop = _protective_cent(
+                    min(invalidation, entry-atr*minimum) if side is PaperSide.LONG else
+                    max(invalidation, entry+atr*minimum), side)
                 item["reference_entry"] = str(entry)
                 item["stop_loss"] = str(stop)
                 item["invalidation"] = str(invalidation)
@@ -122,9 +129,9 @@ def build_scalp_candidates(context: dict) -> dict:
                     item["expected_rr_after_costs"] = str(rr) if rr is not None else None
                 pending_entry = _d(item["level"]) + (Decimal("10") if side is PaperSide.LONG else -Decimal("10"))
                 better_limit = (pending_entry < entry if side is PaperSide.LONG else pending_entry > entry)
-                pending_stop = (min(invalidation, pending_entry-atr*minimum)
-                                if side is PaperSide.LONG else
-                                max(invalidation, pending_entry+atr*minimum))
+                pending_stop = _protective_cent(
+                    min(invalidation, pending_entry-atr*minimum) if side is PaperSide.LONG else
+                    max(invalidation, pending_entry+atr*minimum), side)
                 pending_rr = (risk_reward_for_rates(cfd20_rates(), side, pending_entry, pending_stop, target,
                                                    Decimal("1"))["rr_ratio"]
                               if target is not None and pending_stop > 0 else None)

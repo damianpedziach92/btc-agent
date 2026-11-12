@@ -16,6 +16,7 @@ from services.market_context import build_market_context
 from services.paper_trading import PaperTradingService
 from services.pending_orders import PendingOrderManager
 from services.scalp_candidates import build_scalp_candidates
+from services.scalp_candidates import _protective_cent
 
 
 D = Decimal
@@ -121,6 +122,9 @@ def test_pending_limit_has_its_own_structural_stop_and_rr():
     assert candidate["pending_eligible"] is True
     assert D(candidate["pending_stop_loss"]) <= D(candidate["pending_entry_level"])-D("120")
     assert D(candidate["pending_rr_after_costs"]) >= D("1.5")
+    assert D(candidate["pending_stop_loss"]).as_tuple().exponent == -2
+    assert _protective_cent(D("71918.28949790476461000412816"), PaperSide.SHORT) == D("71918.29")
+    assert _protective_cent(D("71143.400000000001"), PaperSide.LONG) == D("71143.40")
 
 
 def test_scalp_pending_create_amend_fill_keeps_strategy_and_rr():
