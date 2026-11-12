@@ -15,7 +15,7 @@ from database.connection import SessionLocal
 from database.models.agent_decision import AgentDecisionORM
 from database.models.candle import CandleORM
 from database.models.decision_review import DecisionReviewORM
-from database.models.paper import PaperPositionEventORM, PaperPositionORM
+from database.models.paper import PaperPositionEventORM, PaperPositionORM, PaperPendingOrderORM, PaperOrderEventORM
 from models.decision_review import DecisionReview, ReviewAssessment
 from models.market import Instrument, Timeframe
 from repositories.candle_repository import CandleRepository
@@ -100,7 +100,7 @@ def build_review_context(session: Session, window_end: datetime) -> dict:
             "Candle and position outcomes "
             "stop at window_end; PAPER execution records reflect the currently stored result."
         ),
-        "decisions": [], "positions": [], "paper_events": [], "actions": [],
+        "decisions": [], "positions": [], "paper_events": [], "orders": [], "order_events": [], "actions": [],
     }
     earliest = decisions[0].created_at if decisions else window_start
     candles_by_timeframe = {}
@@ -136,6 +136,7 @@ def build_review_context(session: Session, window_end: datetime) -> dict:
             "decision": decision.decision, "text": decision.text[:800],
             "open_proposal": decision.open_proposal,
             "position_actions": decision.position_actions or [],
+            "pending_order_actions": decision.pending_order_actions or [],
             "paper_status": decision.paper_status,
             "paper_result": decision.paper_result,
             "analysis_trace": decision.analysis_trace,
@@ -172,6 +173,70 @@ def build_review_context(session: Session, window_end: datetime) -> dict:
     } for event in events]
     context["paper_events"] = event_summaries
     context["positions"] = [_position_summary(row, window_end) for row in positions]
+    orders = list(session.scalars(select(PaperPendingOrderORM).where(
+        or_(PaperPendingOrderORM.created_by_decision_id.in_(decision_ids),
+            and_(PaperPendingOrderORM.filled_at >= window_start, PaperPendingOrderORM.filled_at < window_end),
+            and_(PaperPendingOrderORM.updated_at >= window_start, PaperPendingOrderORM.updated_at < window_end)),
+    ).order_by(PaperPendingOrderORM.created_at, PaperPendingOrderORM.id)))
+    linked_position_ids = [row.position_id for row in orders if row.position_id]
+    missing_position_ids = [position_id for position_id in linked_position_ids if position_id not in position_ids]
+    if missing_position_ids:
+        linked_positions = list(session.scalars(select(PaperPositionORM).where(
+            PaperPositionORM.id.in_(missing_position_ids),
+            PaperPositionORM.entry_at < window_end,
+        )))
+        positions.extend(linked_positions)
+        context["positions"] = [_position_summary(row, window_end) for row in positions]
+        linked_events = list(session.scalars(select(PaperPositionEventORM).where(
+            PaperPositionEventORM.position_id.in_(missing_position_ids),
+            PaperPositionEventORM.event_time < window_end,
+        ).order_by(PaperPositionEventORM.event_time)))
+        linked_summaries = [{
+            "type": event.type, "event_time": event.event_time.isoformat(),
+            "position_id": str(event.position_id),
+            "decision_id": str(event.decision_id) if event.decision_id else None,
+            "payload": event.payload,
+        } for event in linked_events]
+        event_summaries.extend(linked_summaries)
+        context["paper_events"].extend(linked_summaries)
+    order_ids = [row.id for row in orders]
+    all_order_events = list(session.scalars(select(PaperOrderEventORM).where(
+        PaperOrderEventORM.order_id.in_(order_ids),
+        PaperOrderEventORM.event_time < window_end,
+    ).order_by(PaperOrderEventORM.event_time, PaperOrderEventORM.id)))
+    order_events = [event for event in all_order_events if event.event_time >= window_start]
+    events_by_order = {}
+    for event in all_order_events:
+        events_by_order.setdefault(event.order_id, []).append(event)
+    context["orders"] = [{
+        "id": str(row.id),
+        "status_at_window_end": ({"FILLED": "FILLED", "EXPIRED": "EXPIRED",
+                                  "CANCELLED": "CANCELLED", "REJECTED_RISK_AT_TRIGGER": "REJECTED",
+                                  "MISSED": "MISSED"}.get(events_by_order[row.id][-1].type, "PENDING")
+                                 if events_by_order.get(row.id) else "PENDING"),
+        "order_type": next((event.payload["order_type"] for event in reversed(events_by_order.get(row.id, []))
+                            if "order_type" in event.payload), row.order_type),
+        "side": row.side,
+        "entry_level_usd": next((event.payload["entry_level_usd"] for event in reversed(events_by_order.get(row.id, []))
+                                 if "entry_level_usd" in event.payload), str(row.entry_level_usd)),
+        "stop_loss": next((event.payload["stop_loss"] for event in reversed(events_by_order.get(row.id, []))
+                           if "stop_loss" in event.payload), str(row.stop_loss)),
+        "take_profit": next((event.payload["take_profit"] for event in reversed(events_by_order.get(row.id, []))
+                             if "take_profit" in event.payload), str(row.take_profit)),
+        "scenario_key": row.scenario_key, "setup_type": row.setup_type,
+        "reason": next((event.payload["reason"] for event in reversed(events_by_order.get(row.id, []))
+                        if event.type in {"CREATED", "AMENDED"} and "reason" in event.payload), row.reason[:800]),
+        "created_at": row.created_at.isoformat(),
+        "expires_at": next((event.payload["expires_at"] for event in reversed(events_by_order.get(row.id, []))
+                            if "expires_at" in event.payload), row.expires_at.isoformat()),
+        "position_id": str(row.position_id) if row.position_id and row.filled_at and row.filled_at < window_end else None,
+        "fee_snapshot": row.fee_snapshot,
+    } for row in orders]
+    context["order_events"] = [{
+        "id": str(event.id), "order_id": str(event.order_id), "type": event.type,
+        "event_time": event.event_time.isoformat(), "payload": event.payload,
+        "decision_id": str(event.decision_id) if event.decision_id else None,
+    } for event in order_events]
     positions_by_decision = {str(row.agent_decision_id): row for row in positions if row.agent_decision_id}
     for decision in decisions:
         decision_id = str(decision.id)
@@ -194,6 +259,27 @@ def build_review_context(session: Session, window_end: datetime) -> dict:
                 "decision_id": decision_id, "position_id": position_id,
                 "reason": item.get("reason"),
                 "execution_result": result or ({"status": "HELD"} if item["action"] == "HOLD" else decision.paper_result),
+            })
+        pending_result_offset = sum(item["action"] != "HOLD" for item in decision.position_actions or []) + bool(decision.open_proposal)
+        for index, item in enumerate(decision.pending_order_actions or []):
+            action_name = item["action"]
+            result = results[pending_result_offset + index] if len(results) > pending_result_offset + index else None
+            order_id = item.get("order_id") or (result or {}).get("order_id")
+            context["actions"].append({
+                "id": f"decision:{decision_id}:pending:{index}",
+                "type": f"ORDER_{action_name}", "at": decision.created_at.isoformat(),
+                "decision_id": decision_id, "order_id": order_id,
+                "reason": item.get("reason"), "levels": item,
+                "execution_result": result,
+            })
+    for event in context["order_events"]:
+        action_type = {"FILLED": "ORDER_FILL", "EXPIRED": "ORDER_EXPIRE",
+                       "REJECTED_RISK_AT_TRIGGER": "ORDER_REJECT", "MISSED": "ORDER_MISSED"}.get(event["type"])
+        if action_type:
+            context["actions"].append({
+                "id": f"order:{event['order_id']}:{event['id']}", "type": action_type,
+                "at": event["event_time"], "decision_id": event["decision_id"],
+                "order_id": event["order_id"], "execution_result": event,
             })
     for position in positions:
         if (position.close_at is None or not window_start <= position.close_at < window_end
@@ -233,6 +319,7 @@ def _result(row: DecisionReviewORM, status: str) -> dict:
         "action_reviews": row.action_reviews or [],
         "findings": row.findings, "data_gaps": row.data_gaps,
         "notification_status": row.notification_status,
+        "review_metadata": (row.input_snapshot or {}).get("review_metadata"),
     }
 
 
@@ -271,6 +358,12 @@ def run_decision_review(
             reviewer = DecisionReviewer(client, model)
             review = reviewer.analyze(context)
         reviewer_model = reviewer.last_model
+        review_metadata = {
+            "context_truncated": reviewer.context_truncated,
+            "skipped_fields": reviewer.skipped_fields,
+            "batch_count": reviewer.batch_count,
+            "covered_action_ids": reviewer.covered_action_ids,
+        }
     else:
         review = DecisionReview(
             assessment=ReviewAssessment.NO_ACTIONS if context["decisions"] else ReviewAssessment.NO_DECISIONS,
@@ -279,14 +372,18 @@ def run_decision_review(
             action_reviews=[], findings=[], data_gaps=[],
         )
         reviewer_model = "none"
+        review_metadata = {"context_truncated": False, "skipped_fields": [],
+                           "batch_count": 0, "covered_action_ids": []}
 
     if preview:
         return {"status": "PREVIEW", "window_end": window_end.isoformat(),
                 "decision_count": len(context["decisions"]),
                 "action_count": len(context["actions"]),
                 "reviewer_model": reviewer_model,
+                "review_metadata": review_metadata,
                 "review": review.model_dump(mode="json")}
 
+    context["review_metadata"] = review_metadata
     with SessionLocal.begin() as session:
         review_id = session.execute(insert(DecisionReviewORM).values(
             id=uuid4(), instrument=Instrument.BTC_USD.value,

@@ -11,7 +11,8 @@ from models.decision_review import ActionVerdict, DecisionReview, FindingCategor
 
 
 INSTRUCTIONS = """Jesteś audytorem DZIAŁAŃ edukacyjnego agenta BTC/USD PAPER.
-Oceń propozycje otwarcia LONG/SHORT, decyzje CLOSE/HOLD i automatyczne
+Oceń propozycje otwarcia LONG/SHORT, decyzje CLOSE/HOLD, zlecenia
+oczekujące CREATE/AMEND/CANCEL/HOLD/FILL/EXPIRE/REJECT i automatyczne
 zamknięcia TP/SL z jednego zakończonego okna 2h. Nie składasz zleceń.
 Zwróć wyłącznie ustrukturyzowaną ocenę po polsku.
 
@@ -32,6 +33,10 @@ Najważniejsze pytania dla KAŻDEJ pozycji w `actions`:
   świeca M1 przeciw pozycji nie jest automatycznym powodem CLOSE.
 - Przy automatycznym TP/SL sprawdź, czy zapisane poziomy i zdarzenie są
   spójne. To mechanika PAPER, a nie nowa decyzja agenta.
+- Przy zleceniu oczekującym odróżnij błędny setup od poprawnego zlecenia,
+  które wygasło bez dotknięcia. Sprawdź ceny wykonania CFD po właściwej
+  stronie stałego spreadu 20 USD/BTC, 0 prowizji i ilość BTC. Historyczne
+  pozycje z LEGACY_BPS oceń według ich snapshotu, nie według CFD20.
 
 W `action_reviews` zwróć DOKŁADNIE jeden wpis dla każdego `actions.id`,
 w tej samej kolejności. Podaj werdykt, konkretny powód, dowód i lekcję.
@@ -44,7 +49,9 @@ propozycji. Sam późniejszy SL lub ujemny PnL NIE dowodzi złej decyzji.
 `known_at_decision` to rekonstrukcja ze świec zamkniętych przed decyzją;
 nie dowodzi, że agent faktycznie pobrał wszystkie te dane. `analysis_trace.tool_calls` pokazuje faktyczne wywołania
 narzędzi tylko dla nowych decyzji; jeśli jest null, użycie narzędzi jest
-nieznane. Odróżniaj role M1, M5, M15 i H1 i wskaż, kiedy agent pominął
+nieznane. `analysis_trace.market_context` może zawierać komplet danych
+przekazanych przed wywołaniem modelu; pusta lista tool_calls nie oznacza
+wtedy, że agent nie widział M1/M5/M15/H1. Odróżniaj role interwałów i wskaż, kiedy agent pominął
 istotny kontekst wyższych interwałów. `observed_after_decision`, pozycje
 i zdarzenia służą wyłącznie do oceny rezultatu i wykonania. Nie używaj
 przyszłych świec do oceny jakości decyzji w chwili jej podjęcia.
@@ -74,8 +81,105 @@ class DecisionReviewer:
         self.client = client
         self.model = model
         self.last_model = model
+        self.batch_count = 0
+        self.context_truncated = False
+        self.skipped_fields: list[str] = []
+        self.covered_action_ids: list[str] = []
 
     def analyze(self, context: dict) -> DecisionReview:
+        actions = context.get("actions", [])
+        raw = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+        if len(raw) <= MAX_CONTEXT_CHARS and len(actions) <= 8:
+            result = self._analyze_one(context)
+            self.batch_count = 1
+            self.context_truncated = False
+            self.skipped_fields = []
+            self.covered_action_ids = [item.action_id for item in result.action_reviews]
+            return result
+        self.context_truncated = True
+        self.skipped_fields = ["repeated_decisions", "unrelated_positions_events",
+                               "tool_output_payloads", "oldest_repeated_candles"]
+        compact = []
+        by_decision = {item["id"]: item for item in context.get("decisions", [])}
+        for action in actions:
+            decision = by_decision.get(action.get("decision_id"))
+            if decision:
+                decision = dict(decision)
+                known = {}
+                for timeframe, series in (decision.get("known_at_decision") or {}).items():
+                    known[timeframe] = {**series,
+                        "recent_closed_candles": series.get("recent_closed_candles", [])[-3:]}
+                decision["known_at_decision"] = known
+                trace = decision.get("analysis_trace") or {}
+                decision["analysis_trace"] = {
+                    "instructions_hash": trace.get("instructions_hash"),
+                    "tool_calls": [{key: call.get(key) for key in ("name", "status", "arguments", "retrieved_at")}
+                                   for call in trace.get("tool_calls", [])] if isinstance(trace, dict) else [],
+                }
+            position_ids = {action.get("position_id")}
+            item = {
+                "instrument": context.get("instrument"),
+                "window_start": context.get("window_start"),
+                "window_end": context.get("window_end"),
+                "data_policy": context.get("data_policy"),
+                "decisions": [decision] if decision else [],
+                "positions": [p for p in context.get("positions", []) if p["id"] in position_ids],
+                "paper_events": [e for e in context.get("paper_events", [])
+                                 if e.get("position_id") in position_ids or
+                                 e.get("decision_id") == action.get("decision_id")][-20:],
+                "orders": [o for o in context.get("orders", []) if o["id"] == action.get("order_id")],
+                "order_events": [e for e in context.get("order_events", [])
+                                 if e["order_id"] == action.get("order_id")][-20:],
+                "actions": [action],
+            }
+            if len(json.dumps(item, ensure_ascii=False)) > MAX_CONTEXT_CHARS // 2:
+                raise ValueError(f"Single review action {action['id']} still exceeds compact budget")
+            compact.append(item)
+        batches = []
+        current = None
+        for item in compact:
+            if current is None:
+                current = {**item, "decisions": [], "positions": [], "paper_events": [],
+                           "orders": [], "order_events": [], "actions": []}
+            candidate = {**current,
+                "decisions": current["decisions"] + item["decisions"],
+                "positions": current["positions"] + item["positions"],
+                "paper_events": current["paper_events"] + item["paper_events"],
+                "orders": current["orders"] + item["orders"],
+                "order_events": current["order_events"] + item["order_events"],
+                "actions": current["actions"] + item["actions"]}
+            if current["actions"] and (len(candidate["actions"]) > 6 or
+                                       len(json.dumps(candidate, ensure_ascii=False)) > MAX_CONTEXT_CHARS * 8 // 10):
+                batches.append(current)
+                current = {**item, "decisions": item["decisions"], "positions": item["positions"],
+                           "paper_events": item["paper_events"], "orders": item["orders"],
+                           "order_events": item["order_events"], "actions": item["actions"]}
+            else:
+                current = candidate
+        if current and current["actions"]:
+            batches.append(current)
+        if not batches:
+            return self._analyze_one(context)
+        reviews = [self._analyze_one(batch) for batch in batches]
+        self.batch_count = len(batches)
+        action_reviews = [item for review in reviews for item in review.action_reviews]
+        self.covered_action_ids = [item.action_id for item in action_reviews]
+        if self.covered_action_ids != [item["id"] for item in actions]:
+            raise RuntimeError("Batched reviewer did not cover every action in order")
+        findings = [item for review in reviews for item in review.findings]
+        gaps = [item for review in reviews for item in review.data_gaps]
+        if findings:
+            assessment = ReviewAssessment.ISSUES_FOUND
+        elif gaps or any(item.verdict is ActionVerdict.INSUFFICIENT_DATA for item in action_reviews):
+            assessment = ReviewAssessment.INSUFFICIENT_DATA
+            gaps = gaps or ["Części działań nie można ocenić z zapisanych danych."]
+        else:
+            assessment = ReviewAssessment.NO_ISSUES
+        return DecisionReview(assessment=assessment,
+            summary=f"Oceniono {len(action_reviews)} działań w {len(batches)} porcjach; błędy: {len(findings)}.",
+            action_reviews=action_reviews, findings=findings, data_gaps=gaps)
+
+    def _analyze_one(self, context: dict) -> DecisionReview:
         raw_context = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
         if len(raw_context) > MAX_CONTEXT_CHARS:
             raise ValueError("Decision review context exceeds the model input budget")

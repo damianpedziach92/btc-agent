@@ -217,6 +217,41 @@ def test_reviewer_marks_close_without_position_insufficient():
     assert result.action_reviews[0].verdict.value == "INSUFFICIENT_DATA"
 
 
+def test_reviewer_batches_large_context_and_covers_every_action():
+    decision_id = uuid4()
+    actions = [{"id": f"decision:{decision_id}:pending:{index}", "type": "ORDER_CREATE",
+                "decision_id": str(decision_id), "at": END.isoformat()}
+               for index in range(18)]
+    context = {"instrument": "BTC/USD", "window_start": (END-timedelta(hours=2)).isoformat(),
+               "window_end": END.isoformat(), "actions": actions,
+               "decisions": [{"id": str(decision_id), "text": "Setup M15",
+                              "analysis_trace": {"tool_calls": [], "large_payload": "x" * 120_000}}]}
+
+    class DynamicResponses:
+        def __init__(self):
+            self.requests = []
+
+        def create(self, **kwargs):
+            self.requests.append(kwargs)
+            payload = json.loads(kwargs["input"][0]["content"])
+            result = {"assessment": "NO_ISSUES", "summary": "Oceniono działania.",
+                      "action_reviews": [{"action_id": action["id"], "action_type": action["type"],
+                                          "verdict": "JUSTIFIED", "reason": "Spójna dyspozycja",
+                                          "evidence": "Zapis decyzji", "lesson": "Monitorować"}
+                                         for action in payload["actions"]],
+                      "findings": [], "data_gaps": []}
+            return SimpleNamespace(status="completed", output=[], model="review-model",
+                                   output_text=json.dumps(result))
+
+    responses = DynamicResponses()
+    reviewer = DecisionReviewer(SimpleNamespace(responses=responses), "test-model")
+    review = reviewer.analyze(context)
+    assert [item.action_id for item in review.action_reviews] == [action["id"] for action in actions]
+    assert reviewer.batch_count == len(responses.requests) > 1
+    assert reviewer.context_truncated
+    assert all(len(request["input"][0]["content"]) < 100_000 for request in responses.requests)
+
+
 def test_review_is_saved_once_and_telegram_retries_without_duplicate(isolated_sessions, monkeypatch):
     monkeypatch.setattr(decision_review, "SessionLocal", isolated_sessions)
     monkeypatch.setattr(review_notifications, "SessionLocal", isolated_sessions)

@@ -1,0 +1,329 @@
+{
+  "model": "CFD20 | spread $20/BTC | fee 0 | simulation only",
+  "status": "COUNTERFACTUAL_READ_ONLY",
+  "sample_size": 12,
+  "original_ledger_unchanged": true,
+  "caveat": "Ceny odniesienia odtworzono z założeń dawnego modelu; OHLC nie pokazuje kolejności ticków ani płynności CFD. Próba nie dowodzi skuteczności strategii.",
+  "positions": [
+    {
+      "position_id": "60b76178-d09a-4ed6-8bcd-3dbf0bd356bf",
+      "side": "LONG",
+      "quantity_btc": "0.002694580000",
+      "original_execution_model": "LEGACY_BPS",
+      "original_entry_price": "74190.285090000000",
+      "original_exit_price": "74035.000000000000",
+      "original_exit_reason": "STOP_LOSS",
+      "original_net_pnl": "-0.817832986510",
+      "same_exit_cost_only": {
+        "entry_mid": "74175.45",
+        "exit_mid": "74035.000000000000",
+        "cfd_entry_price": "74185.45",
+        "cfd_exit_price": "74025.000000000000",
+        "net_pnl": "-0.432345361000000000000000",
+        "spread_cost_usd": "0.053891600000"
+      },
+      "rerun_protection": {
+        "status": "CLOSED",
+        "reason": "STOP_LOSS",
+        "exit_at": "2026-11-11T16:19:00+00:00",
+        "exit_price": "74035.000000000000",
+        "net_pnl": "-0.405399561000000000000000",
+        "fill_assumption": "BARRIER_TOUCH_OHLC",
+        "both_barriers_hit": false
+      }
+    },
+    {
+      "position_id": "9a5c0f2c-5fee-4f4a-9842-70e8c98a72c6",
+      "side": "SHORT",
+      "quantity_btc": "0.002693450000",
+      "original_execution_model": "LEGACY_BPS",
+      "original_entry_price": "74160.714890000000",
+      "original_exit_price": "74202.287490000000",
+      "original_exit_reason": "AGENT",
+      "original_net_pnl": "-0.511582048230",
+      "same_exit_cost_only": {
+        "entry_mid": "74175.55",
+        "exit_mid": "74187.45",
+        "cfd_entry_price": "74165.55",
+        "cfd_exit_price": "74197.45",
+        "net_pnl": "-0.08592105500000",
+        "spread_cost_usd": "0.053869000000"
+      },
+      "rerun_protection": {
+        "status": "CLOSED",
+        "reason": "STOP_LOSS",
+        "exit_at": "2026-11-11T16:52:00+00:00",
+        "exit_price": "74270.000000000000",
+        "net_pnl": "-0.281330852500000000000000",
+        "fill_assumption": "BARRIER_TOUCH_OHLC",
+        "both_barriers_hit": false
+      }
+    },
+    {
+      "position_id": "6406c004-77da-45b3-9f55-75324b74ac38",
+      "side": "LONG",
+      "quantity_btc": "0.002687650000",
+      "original_execution_model": "LEGACY_BPS",
+      "original_entry_price": "74282.803590000000",
+      "original_exit_price": "74600.000000000000",
+      "original_exit_reason": "TAKE_PROFIT",
+      "original_net_pnl": "0.452368064267",
+      "same_exit_cost_only": {
+        "entry_mid": "74267.95",
+        "exit_mid": "74600.000000000000",
+        "cfd_entry_price": "74277.95",
+        "cfd_exit_price": "74590.000000000000",
+        "net_pnl": "0.838681182500000000000000",
+        "spread_cost_usd": "0.053753000000"
+      },
+      "rerun_protection": {
+        "status": "CLOSED",
+        "reason": "TAKE_PROFIT",
+        "exit_at": "2026-11-11T17:19:00+00:00",
+        "exit_price": "74600.000000000000",
+        "net_pnl": "0.865557682500000000000000",
+        "fill_assumption": "BARRIER_TOUCH_OHLC",
+        "both_barriers_hit": false
+      }
+    },
+    {
+      "position_id": "8b869128-4acf-4566-bb58-499be23a9e59",
+      "side": "LONG",
+      "quantity_btc": "0.006713870000",
+      "original_execution_model": "LEGACY_BPS",
+      "original_entry_price": "74325.612150000000",
+      "original_exit_price": "74571.900000000000",
+      "original_exit_reason": "TAKE_PROFIT",
+      "original_net_pnl": "0.653866067581",
+      "same_exit_cost_only": {
+        "entry_mid": "74310.75",
+        "exit_mid": "74571.900000000000",
+        "cfd_entry_price": "74320.75",
+        "cfd_exit_price": "74561.900000000000",
+        "net_pnl": "1.619049750500000000000000",
+        "spread_cost_usd": "0.134277400000"
+      },
+      "rerun_protection": {
+        "status": "CLOSED",
+        "reason": "TAKE_PROFIT",
+        "exit_at": "2026-11-11T20:49:00+00:00",
+        "exit_price": "74571.900000000000",
+        "net_pnl": "1.686188450500000000000000",
+        "fill_assumption": "BARRIER_TOUCH_OHLC",
+        "both_barriers_hit": false
+      }
+    },
+    {
+      "position_id": "420c327c-c76c-4723-a6da-d67b53daf76d",
+      "side": "LONG",
+      "quantity_btc": "0.005368420000",
+      "original_execution_model": "LEGACY_BPS",
+      "original_entry_price": "74524.451910000000",
+      "original_exit_price": "74408.665290000000",
+      "original_exit_reason": "AGENT",
+      "original_net_pnl": "-1.421126731579",
+      "same_exit_cost_only": {
+        "entry_mid": "74509.55",
+        "exit_mid": "74423.55",
+        "cfd_entry_price": "74519.55",
+        "cfd_exit_price": "74413.55",
+        "net_pnl": "-0.56905252000000",
+        "spread_cost_usd": "0.107368400000"
+      },
+      "rerun_protection": {
+        "status": "CLOSED",
+        "reason": "AGENT",
+        "exit_at": "2026-11-11T21:45:47.853998+00:00",
+        "exit_price": "74413.55",
+        "net_pnl": "-0.56905252000000",
+        "fill_assumption": "original_discretionary_exit_time"
+      }
+    },
+    {
+      "position_id": "51fc594a-4cf5-4c1e-a321-920b0744bd1f",
+      "side": "SHORT",
+      "quantity_btc": "0.006789120000",
+      "original_execution_model": "LEGACY_BPS",
+      "original_entry_price": "73445.258010000000",
+      "original_exit_price": "73844.615970000000",
+      "original_exit_reason": "AGENT",
+      "original_net_pnl": "-3.711257742630",
+      "same_exit_cost_only": {
+        "entry_mid": "73459.95",
+        "exit_mid": "73829.85",
+        "cfd_entry_price": "73449.95",
+        "cfd_exit_price": "73839.85",
+        "net_pnl": "-2.64707788800000",
+        "spread_cost_usd": "0.135782400000"
+      },
+      "rerun_protection": {
+        "status": "CLOSED",
+        "reason": "AGENT",
+        "exit_at": "2026-11-11T23:45:57.078389+00:00",
+        "exit_price": "73839.85",
+        "net_pnl": "-2.64707788800000",
+        "fill_assumption": "original_discretionary_exit_time"
+      }
+    },
+    {
+      "position_id": "b6284d6f-b337-4908-875a-ebf79c08be20",
+      "side": "LONG",
+      "quantity_btc": "0.006714170000",
+      "original_execution_model": "LEGACY_BPS",
+      "original_entry_price": "73989.044850000000",
+      "original_exit_price": "73920.462950000000",
+      "original_exit_reason": "AGENT",
+      "original_net_pnl": "-1.453560115509",
+      "same_exit_cost_only": {
+        "entry_mid": "73974.25",
+        "exit_mid": "73935.25",
+        "cfd_entry_price": "73984.25",
+        "cfd_exit_price": "73925.25",
+        "net_pnl": "-0.39613603000000",
+        "spread_cost_usd": "0.134283400000"
+      },
+      "rerun_protection": {
+        "status": "CLOSED",
+        "reason": "AGENT",
+        "exit_at": "2026-11-12T01:00:51.309988+00:00",
+        "exit_price": "73925.25",
+        "net_pnl": "-0.39613603000000",
+        "fill_assumption": "original_discretionary_exit_time"
+      }
+    },
+    {
+      "position_id": "6197f94b-f079-40c1-b596-54d569a70ba9",
+      "side": "SHORT",
+      "quantity_btc": "0.006742500000",
+      "original_execution_model": "LEGACY_BPS",
+      "original_entry_price": "73570.532950000000",
+      "original_exit_price": "73748.796810000000",
+      "original_exit_reason": "AGENT",
+      "original_net_pnl": "-2.195244656956",
+      "same_exit_cost_only": {
+        "entry_mid": "73585.25",
+        "exit_mid": "73734.05",
+        "cfd_entry_price": "73575.25",
+        "cfd_exit_price": "73744.05",
+        "net_pnl": "-1.13813400000000",
+        "spread_cost_usd": "0.134850000000"
+      },
+      "rerun_protection": {
+        "status": "CLOSED",
+        "reason": "AGENT",
+        "exit_at": "2026-11-12T02:15:48.375752+00:00",
+        "exit_price": "73744.05",
+        "net_pnl": "-1.13813400000000",
+        "fill_assumption": "original_discretionary_exit_time"
+      }
+    },
+    {
+      "position_id": "2be76111-fb3e-4037-b7d8-5f5881b4f4e0",
+      "side": "LONG",
+      "quantity_btc": "0.006696780000",
+      "original_execution_model": "LEGACY_BPS",
+      "original_entry_price": "73909.128870000000",
+      "original_exit_price": "73483.750310000000",
+      "original_exit_reason": "AGENT",
+      "original_net_pnl": "-3.835724318472",
+      "same_exit_cost_only": {
+        "entry_mid": "73894.35",
+        "exit_mid": "73498.45",
+        "cfd_entry_price": "73904.35",
+        "cfd_exit_price": "73488.45",
+        "net_pnl": "-2.78519080200000",
+        "spread_cost_usd": "0.133935600000"
+      },
+      "rerun_protection": {
+        "status": "CLOSED",
+        "reason": "AGENT",
+        "exit_at": "2026-11-12T05:15:50.989330+00:00",
+        "exit_price": "73488.45",
+        "net_pnl": "-2.78519080200000",
+        "fill_assumption": "original_discretionary_exit_time"
+      }
+    },
+    {
+      "position_id": "e83cbb72-54c2-4158-94b2-d7c61293133c",
+      "side": "SHORT",
+      "quantity_btc": "0.006709470000",
+      "original_execution_model": "LEGACY_BPS",
+      "original_entry_price": "73483.750310000000",
+      "original_exit_price": "73546.556370000000",
+      "original_exit_reason": "AGENT",
+      "original_net_pnl": "-1.407890807148",
+      "same_exit_cost_only": {
+        "entry_mid": "73498.45",
+        "exit_mid": "73531.85",
+        "cfd_entry_price": "73488.45",
+        "cfd_exit_price": "73541.85",
+        "net_pnl": "-0.35828569800000",
+        "spread_cost_usd": "0.134189400000"
+      },
+      "rerun_protection": {
+        "status": "CLOSED",
+        "reason": "AGENT",
+        "exit_at": "2026-11-12T05:30:52.683432+00:00",
+        "exit_price": "73541.85",
+        "net_pnl": "-0.35828569800000",
+        "fill_assumption": "original_discretionary_exit_time"
+      }
+    },
+    {
+      "position_id": "622833f9-3b86-44e8-95a9-b15ad7a83d4b",
+      "side": "LONG",
+      "quantity_btc": "0.006700450000",
+      "original_execution_model": "LEGACY_BPS",
+      "original_entry_price": "73477.742610000000",
+      "original_exit_price": "73296.500000000000",
+      "original_exit_reason": "STOP_LOSS",
+      "original_net_pnl": "-2.197860520070",
+      "same_exit_cost_only": {
+        "entry_mid": "73463.05",
+        "exit_mid": "73296.500000000000",
+        "cfd_entry_price": "73473.05",
+        "cfd_exit_price": "73286.500000000000",
+        "net_pnl": "-1.249968947500000000000000",
+        "spread_cost_usd": "0.134009000000"
+      },
+      "rerun_protection": {
+        "status": "CLOSED",
+        "reason": "STOP_LOSS",
+        "exit_at": "2026-11-12T09:14:00+00:00",
+        "exit_price": "73296.500000000000",
+        "net_pnl": "-1.182964447500000000000000",
+        "fill_assumption": "BARRIER_TOUCH_OHLC",
+        "both_barriers_hit": false
+      }
+    },
+    {
+      "position_id": "22b9b137-595a-4800-9372-692eef308ce9",
+      "side": "SHORT",
+      "quantity_btc": "0.006704960000",
+      "original_execution_model": "LEGACY_BPS",
+      "original_entry_price": "73264.594150000000",
+      "original_exit_price": "73398.426750000000",
+      "original_exit_reason": "AGENT",
+      "original_net_pnl": "-1.880711918310",
+      "same_exit_cost_only": {
+        "entry_mid": "73279.25",
+        "exit_mid": "73383.75",
+        "cfd_entry_price": "73269.25",
+        "cfd_exit_price": "73393.75",
+        "net_pnl": "-0.83476752000000",
+        "spread_cost_usd": "0.134099200000"
+      },
+      "rerun_protection": {
+        "status": "CLOSED",
+        "reason": "AGENT",
+        "exit_at": "2026-11-12T09:30:39.591900+00:00",
+        "exit_price": "73393.75",
+        "net_pnl": "-0.83476752000000",
+        "fill_assumption": "original_discretionary_exit_time"
+      }
+    }
+  ],
+  "original_net_total": "-18.326557713566",
+  "cost_only_net_total": "-8.039148888500000000000000",
+  "protection_replay_resolved": 12
+}

@@ -2,7 +2,7 @@ import argparse
 from decimal import Decimal
 
 from database.connection import SessionLocal
-from models.paper import FeeRates, MarketType
+from models.paper import FeeRates, MarketType, cfd20_rates
 from services.paper_trading import PaperTradingService
 
 
@@ -26,6 +26,8 @@ def main() -> None:
                         help="Add explicit fictional SPOT_MARGIN rates for simulation only")
     parser.add_argument("--okx-eea-taker-profile", action="store_true",
                         help="Use requested 0.1%% taker and fixed 4 bps PAPER spread, with other costs zero")
+    parser.add_argument("--cfd20", action="store_true",
+                        help="Activate the sole current PAPER execution model: fixed $20/BTC spread, zero fees")
     for name in (
         "trade-entry-fee-rate", "trade-exit-fee-rate",
         "margin-opening-fee-rate", "rollover-rate-per-4h",
@@ -40,11 +42,11 @@ def main() -> None:
         args.margin_opening_fee_rate, args.rollover_rate_per_4h,
         args.slippage_bps, args.spread_bps,
     )
-    if args.estimated_demo_profile and args.okx_eea_taker_profile:
+    if sum((args.estimated_demo_profile, args.okx_eea_taker_profile, args.cfd20)) > 1:
         parser.error("Choose one built-in fee profile")
-    if (args.estimated_demo_profile or args.okx_eea_taker_profile) and any(value is not None for value in custom_values):
+    if (args.estimated_demo_profile or args.okx_eea_taker_profile or args.cfd20) and any(value is not None for value in custom_values):
         parser.error("Choose a built-in profile or complete custom rates")
-    if (args.estimated_demo_profile or args.okx_eea_taker_profile) and args.fee_source:
+    if (args.estimated_demo_profile or args.okx_eea_taker_profile or args.cfd20) and args.fee_source:
         parser.error("Built-in profiles already have a source label")
     if args.fee_source and not any(value is not None for value in custom_values):
         parser.error("--fee-source requires all six custom rates")
@@ -55,7 +57,9 @@ def main() -> None:
     with SessionLocal.begin() as session:
         service = PaperTradingService(session)
         account = service.seed_account()
-        if args.estimated_demo_profile:
+        if args.cfd20:
+            rates = cfd20_rates()
+        elif args.estimated_demo_profile:
             rates = FeeRates(
                 market_type=MarketType.SPOT_MARGIN, status="ESTIMATED",
                 source="explicit_simulation_assumption_not_kraken_quote",

@@ -62,9 +62,9 @@ class DecisionReview(BaseModel):
 
     assessment: ReviewAssessment
     summary: str = Field(min_length=1, max_length=1000)
-    action_reviews: list[ActionReview] = Field(default_factory=list, max_length=24)
-    findings: list[ReviewFinding] = Field(max_length=12)
-    data_gaps: list[str] = Field(max_length=12)
+    action_reviews: list[ActionReview] = Field(default_factory=list, max_length=500)
+    findings: list[ReviewFinding] = Field(max_length=200)
+    data_gaps: list[str] = Field(max_length=200)
 
     @model_validator(mode="after")
     def consistent_assessment(self):
@@ -90,7 +90,9 @@ REVIEW_SCHEMA = {
             "type": "object",
             "properties": {
                 "action_id": {"type": "string"},
-                "action_type": {"type": "string", "enum": ["OPEN_LONG", "OPEN_SHORT", "CLOSE", "HOLD", "AUTO_CLOSE"]},
+            "action_type": {"type": "string", "enum": ["OPEN_LONG", "OPEN_SHORT", "CLOSE", "HOLD", "AUTO_CLOSE",
+                                                     "ORDER_CREATE", "ORDER_AMEND", "ORDER_CANCEL", "ORDER_HOLD",
+                                                     "ORDER_FILL", "ORDER_EXPIRE", "ORDER_REJECT", "ORDER_MISSED"]},
                 "verdict": {"type": "string", "enum": [item.value for item in ActionVerdict]},
                 "reason": {"type": "string"},
                 "evidence": {"type": "string"},

@@ -10,7 +10,7 @@ from alembic import context
 config = context.config
 from database.connection import DATABASE_URL
 
-config.set_main_option("sqlalchemy.url", DATABASE_URL)
+config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -36,6 +36,8 @@ from database.models.paper import (
     PaperPositionEventORM,
     PaperAccountLedgerORM,
     PaperFundingRateORM,
+    PaperPendingOrderORM,
+    PaperOrderEventORM,
 )
 target_metadata = Base.metadata
 # other values from the config, defined by the needs of env.py,

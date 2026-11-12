@@ -6,4 +6,5 @@ __pycache__/
 .coverage
 backups/
 *.dump
-docs/
+docs/*
+!docs/CFD20_RUNBOOK.md

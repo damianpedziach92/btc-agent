@@ -154,6 +154,7 @@ class AgentMemoryRepository:
             model=model,
             open_proposal=decision.open_proposal.model_dump(mode="json") if decision.open_proposal else None,
             position_actions=[item.model_dump(mode="json") for item in decision.position_actions],
+            pending_order_actions=[item.model_dump(mode="json") for item in decision.pending_order_actions],
             analysis_trace=analysis_trace,
             paper_status="PENDING",
         ))

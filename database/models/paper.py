@@ -42,6 +42,8 @@ class PaperFeeProfileORM(Base):
             "slippage_bps >= 0 AND spread_bps >= 0",
             name="ck_paper_fee_nonnegative",
         ),
+        CheckConstraint("spread_usd_per_btc >= 0", name="ck_paper_fee_spread_usd_nonnegative"),
+        CheckConstraint("execution_model IN ('LEGACY_BPS', 'CFD_FIXED_20_USD')", name="ck_paper_fee_execution_model"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -56,6 +58,8 @@ class PaperFeeProfileORM(Base):
     rollover_rate_per_4h: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
     slippage_bps: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
     spread_bps: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    spread_usd_per_btc: Mapped[Decimal] = mapped_column(MONEY, nullable=False, default=0)
+    execution_model: Mapped[str] = mapped_column(String(32), nullable=False, default="LEGACY_BPS")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -148,3 +152,62 @@ class PaperFundingRateORM(Base):
     effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     rate: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
     source: Mapped[str] = mapped_column(String(200), nullable=False)
+
+
+class PaperPendingOrderORM(Base):
+    __tablename__ = "paper_pending_orders"
+    __table_args__ = (
+        UniqueConstraint("execution_key", name="uq_paper_pending_execution_key"),
+        CheckConstraint("status IN ('PENDING','FILLED','CANCELLED','EXPIRED','REJECTED','MISSED')", name="ck_paper_pending_status"),
+        CheckConstraint("order_type IN ('BUY_LIMIT','BUY_STOP','SELL_LIMIT','SELL_STOP')", name="ck_paper_pending_type"),
+        CheckConstraint("entry_level_usd > 0 AND stop_loss > 0 AND take_profit > 0", name="ck_paper_pending_levels"),
+        Index("ix_paper_pending_account_status_expires", "account_id", "status", "expires_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("paper_accounts.id"), nullable=False)
+    instrument: Mapped[str] = mapped_column(String(20), nullable=False)
+    side: Mapped[str] = mapped_column(String(5), nullable=False)
+    order_type: Mapped[str] = mapped_column(String(12), nullable=False)
+    status: Mapped[str] = mapped_column(String(12), nullable=False)
+    entry_level_usd: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    stop_loss: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    take_profit: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    scenario_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    setup_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    invalidating_condition: Mapped[dict | None] = mapped_column(JSONB)
+    quantity_policy: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_decision_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("agent_decisions.id"), nullable=False)
+    last_updated_by_decision_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("agent_decisions.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_reason: Mapped[str | None] = mapped_column(Text)
+    position_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("paper_positions.id"))
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    fee_profile_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("paper_fee_profiles.id"), nullable=False)
+    fee_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    last_evaluated_candle_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    trigger_trace: Mapped[dict | None] = mapped_column(JSONB)
+
+
+class PaperOrderEventORM(Base):
+    __tablename__ = "paper_order_events"
+    __table_args__ = (UniqueConstraint("dedupe_key", name="uq_paper_order_event_dedupe"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("paper_accounts.id"), nullable=False)
+    order_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("paper_pending_orders.id"), nullable=False)
+    decision_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("agent_decisions.id"))
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(180), nullable=False)
+    notification_status: Mapped[str] = mapped_column(String(12), nullable=False, default="DISABLED")
+    notification_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

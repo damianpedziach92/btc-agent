@@ -10,13 +10,13 @@ from database.models.agent_decision import AgentDecisionORM
 from database.models.candle import CandleORM
 from database.models.paper import (
     PaperAccountLedgerORM, PaperAccountORM, PaperFeeProfileORM,
-    PaperFundingRateORM, PaperPositionEventORM, PaperPositionORM,
+    PaperFundingRateORM, PaperPositionEventORM, PaperPositionORM, PaperPendingOrderORM,
 )
-from models.agent_decision import AgentDecision, OpenProposal, PositionActionType
+from models.agent_decision import AgentDecision, OpenProposal, PositionActionType, TriggerCondition
 from models.market import Instrument, Timeframe
 from models.paper import (
-    ZERO, FeeRates, MarketType, PaperSide, RiskConfig, RiskEngine,
-    dec, entry_costs, execution_price, funding_cost, gross_pnl, money, rollover_cost,
+    ZERO, BTC_STEP, CFD_FIXED_20_USD, CFD_SPREAD_USD_PER_BTC, FeeRates, MarketType, PaperSide, RiskConfig, RiskEngine,
+    barrier_touch, dec, entry_costs, estimated_target_net_pnl, execution_price, funding_cost, gross_pnl, money, rollover_cost,
 )
 from repositories.candle_repository import CandleRepository
 from services.market_structure import calculate_market_structure
@@ -45,10 +45,11 @@ class PaperTradingService:
     """Deterministic paper execution; the caller owns the database transaction."""
 
     def __init__(self, session: Session, risk: RiskConfig | None = None,
-                 account_name: str = ACCOUNT_NAME):
+                 account_name: str = ACCOUNT_NAME, *, allow_legacy_test_entries: bool = False):
         self.session = session
         self.risk = risk or RiskConfig.from_env()
         self.account_name = account_name
+        self._allow_legacy_test_entries = allow_legacy_test_entries
 
     def seed_account(self, now: datetime | None = None) -> PaperAccountORM:
         now = now or utc_now()
@@ -87,15 +88,28 @@ class PaperTradingService:
         if any(value < ZERO or value >= Decimal("1") for value in (
             rates.trade_entry_fee_rate, rates.trade_exit_fee_rate,
             rates.margin_opening_fee_rate, rates.rollover_rate_per_4h,
-        )) or rates.slippage_bps < ZERO or rates.spread_bps < ZERO:
+        )) or rates.slippage_bps < ZERO or rates.spread_bps < ZERO or rates.spread_usd_per_btc < ZERO:
             raise ValueError("Invalid fee rates")
+        if rates.execution_model not in {"LEGACY_BPS", CFD_FIXED_20_USD}:
+            raise ValueError("Unknown PAPER execution model")
+        if rates.execution_model == CFD_FIXED_20_USD and (
+            rates.status != "ESTIMATED" or rates.source != "user_requested_cfd_fixed_20_usd_spread" or
+            rates.spread_usd_per_btc != CFD_SPREAD_USD_PER_BTC or
+            any(getattr(rates, field) != ZERO for field in (
+                "trade_entry_fee_rate", "trade_exit_fee_rate", "margin_opening_fee_rate",
+                "rollover_rate_per_4h", "slippage_bps", "spread_bps"))
+        ):
+            raise ValueError("CFD20 requires exactly 20 USD/BTC spread and zero additional charges")
         previous = self._fee_profile(account.id)
         if previous:
             previous_rates = self._rates(previous)
+            if previous_rates.execution_model == CFD_FIXED_20_USD and rates.execution_model != CFD_FIXED_20_USD:
+                raise ValueError("Legacy profiles cannot be reactivated after CFD20")
             fields = (
                 "market_type", "status", "source", "trade_entry_fee_rate",
                 "trade_exit_fee_rate", "margin_opening_fee_rate",
                 "rollover_rate_per_4h", "slippage_bps", "spread_bps",
+                "execution_model", "spread_usd_per_btc",
             )
             if all(getattr(previous_rates, field) == getattr(rates, field) for field in fields):
                 return previous
@@ -108,6 +122,7 @@ class PaperTradingService:
             margin_opening_fee_rate=rates.margin_opening_fee_rate,
             rollover_rate_per_4h=rates.rollover_rate_per_4h,
             slippage_bps=rates.slippage_bps, spread_bps=rates.spread_bps,
+            execution_model=rates.execution_model, spread_usd_per_btc=rates.spread_usd_per_btc,
             created_at=now,
         )
         self.session.add(profile)
@@ -129,6 +144,7 @@ class PaperTradingService:
             margin_opening_fee_rate=profile.margin_opening_fee_rate,
             rollover_rate_per_4h=profile.rollover_rate_per_4h,
             slippage_bps=profile.slippage_bps, spread_bps=profile.spread_bps,
+            execution_model=profile.execution_model, spread_usd_per_btc=profile.spread_usd_per_btc,
         )
 
     def _positions(self, account_id: UUID, lock: bool = False) -> list[PaperPositionORM]:
@@ -233,6 +249,7 @@ class PaperTradingService:
             "open_exposure_notional": sum((p.entry_notional for p in positions), ZERO),
         }
         profile = self._fee_profile(account.id)
+        profile_rates = self._rates(profile) if profile else None
         fees = self.session.scalar(select(func.coalesce(func.sum(PaperPositionORM.fee_total), ZERO)).where(
             PaperPositionORM.account_id == account.id)) or ZERO
         realized = self.session.scalar(select(func.coalesce(func.sum(PaperPositionORM.realized_net_pnl), ZERO)).where(
@@ -256,7 +273,10 @@ class PaperTradingService:
             "pnl_quality": "ESTIMATED_PAPER_ONLY" if profile else "UNCONFIGURED",
             "fee_profile_version": profile.version if profile else None,
             "market_type": profile.market_type if profile else None,
-            "fee_rates": self._rates(profile).as_dict() if profile else None,
+            "execution_model": profile_rates.execution_model if profile_rates else None,
+            "cfd_bid": str(mark - profile_rates.spread_usd_per_btc / 2) if mark is not None and profile_rates and profile_rates.execution_model == CFD_FIXED_20_USD else None,
+            "cfd_ask": str(mark + profile_rates.spread_usd_per_btc / 2) if mark is not None and profile_rates and profile_rates.execution_model == CFD_FIXED_20_USD else None,
+            "fee_rates": profile_rates.as_dict() if profile_rates else None,
             "risk_limits": self.risk.as_dict(),
         }
 
@@ -295,6 +315,10 @@ class PaperTradingService:
                 "fee_status": rate.status, "fee_source": rate.source,
                 "pnl_quality": "ESTIMATED_PAPER_ONLY",
                 "fee_profile_version": rate.version, "market_type": p.market_type,
+                "execution_model": rate.execution_model,
+                "spread_usd_per_btc": str(rate.spread_usd_per_btc),
+                "roundtrip_spread_cost_usd": str(p.quantity_btc * rate.spread_usd_per_btc),
+                "estimated_executable_exit_price": str(estimated_exit_price) if estimated_exit_price is not None else None,
             })
         return result
 
@@ -336,6 +360,9 @@ class PaperTradingService:
             "realized_net_estimate": str(row.realized_net_pnl),
             "fees_paid": str(row.fee_total), "unpaid_loss": str(row.unpaid_loss),
             "fee_status": row.fee_snapshot["status"],
+            "execution_model": FeeRates.from_dict(row.fee_snapshot).execution_model,
+            "quantity_btc": str(row.quantity_btc),
+            "spread_usd_per_btc": str(FeeRates.from_dict(row.fee_snapshot).spread_usd_per_btc),
         } for row in rows]
 
     def _reject(self, account: PaperAccountORM, key: str, reason: str,
@@ -356,11 +383,100 @@ class PaperTradingService:
                                   source=source, now=now,
                                   bid_price=bid_price, ask_price=ask_price)
 
+    def validate_stop_structure(self, side: PaperSide, entry: Decimal,
+                                stop_loss: Decimal | None, price_at: datetime) -> str | None:
+        if self.risk.min_stop_m15_atr_multiple <= ZERO:
+            return None
+        rows = self.session.scalars(select(CandleORM).where(
+            CandleORM.symbol == Instrument.BTC_USD,
+            CandleORM.timeframe == Timeframe.FIFTEEN_MINUTES,
+            CandleORM.timestamp + timedelta(minutes=15) <= price_at,
+        ).order_by(CandleORM.timestamp.desc()).limit(100)).all()
+        structure = calculate_market_structure(
+            [CandleRepository._to_candle(row) for row in rows],
+            swing_candles=self.risk.stop_swing_m15_candles,
+        )
+        atr = dec(structure["atr14"]) if structure["atr14"] is not None else None
+        latest_m15_close = (datetime.fromisoformat(structure["timestamp"]) + timedelta(minutes=15)
+                            if structure["timestamp"] else None)
+        if (atr is None or stop_loss is None or structure["swing_low"] is None or
+            latest_m15_close is None or price_at - latest_m15_close > timedelta(minutes=30)):
+            return "Fresh M15 ATR/swing data and stop loss required by strategy"
+        buffer = atr * self.risk.stop_swing_atr_buffer
+        minimum_distance = atr * self.risk.min_stop_m15_atr_multiple
+        if side is PaperSide.LONG:
+            highest_allowed_stop = min(entry - minimum_distance, dec(structure["swing_low"]) - buffer)
+            if stop_loss > highest_allowed_stop:
+                return f"SL too close for M15 structure; LONG SL must be <= {highest_allowed_stop:.2f}"
+        else:
+            lowest_allowed_stop = max(entry + minimum_distance, dec(structure["swing_high"]) + buffer)
+            if stop_loss < lowest_allowed_stop:
+                return f"SL too close for M15 structure; SHORT SL must be >= {lowest_allowed_stop:.2f}"
+        return None
+
+    def validate_entry_trigger(self, proposal: OpenProposal, side: PaperSide,
+                               entry: Decimal, decision: AgentDecisionORM, rates: FeeRates) -> str | None:
+        required = ("setup_type", "market_regime", "signal_timeframe", "trigger_candle_timestamp",
+                    "trigger_level", "trigger_condition", "invalidation_level",
+                    "expected_rr_after_costs", "signal_age_seconds", "countertrend")
+        if any(getattr(proposal, key) is None for key in required) or proposal.stop_loss is None or proposal.take_profit is None:
+            return "Structured setup, closed trigger candle, SL and TP required for new CFD20 entries"
+        step = timedelta(minutes=proposal.signal_timeframe.minutes)
+        candle = self.session.scalar(select(CandleORM).where(
+            CandleORM.symbol == Instrument.BTC_USD,
+            CandleORM.timeframe == proposal.signal_timeframe,
+            CandleORM.timestamp == proposal.trigger_candle_timestamp,
+        ))
+        closed_at = proposal.trigger_candle_timestamp + step
+        if candle is None or closed_at > decision.created_at:
+            return "Trigger candle is missing or was not closed before analysis"
+        age = int((decision.created_at - closed_at).total_seconds())
+        if age < 0 or age > max(int(step.total_seconds()*2), 900):
+            return "Trigger signal is stale"
+        snapshot_at = ((decision.analysis_trace or {}).get("market_context") or {}).get("as_of")
+        observed_at = datetime.fromisoformat(snapshot_at) if snapshot_at else decision.created_at
+        if abs(int((observed_at - closed_at).total_seconds()) - proposal.signal_age_seconds) > 60:
+            return "Declared trigger age disagrees with stored candle"
+        if proposal.trigger_condition is TriggerCondition.CLOSE_ABOVE and candle.close <= proposal.trigger_level:
+            return "Trigger candle did not close above declared level"
+        if proposal.trigger_condition is TriggerCondition.CLOSE_BELOW and candle.close >= proposal.trigger_level:
+            return "Trigger candle did not close below declared level"
+        if side is PaperSide.LONG and proposal.stop_loss > proposal.invalidation_level:
+            return "LONG SL must protect the declared invalidation level"
+        if side is PaperSide.SHORT and proposal.stop_loss < proposal.invalidation_level:
+            return "SHORT SL must protect the declared invalidation level"
+        expected_net = estimated_target_net_pnl(rates, side, entry, proposal.take_profit,
+            Decimal("1"), proposal.stop_loss, 0)
+        realized_rr = expected_net / abs(entry - proposal.stop_loss)
+        if proposal.expected_rr_after_costs > realized_rr * Decimal("1.2"):
+            return f"Claimed RR {proposal.expected_rr_after_costs} exceeds executable RR {realized_rr:.3f}"
+        return None
+
+    def validate_chase(self, side: PaperSide, entry: Decimal, price_at: datetime) -> str | None:
+        multiple = self.risk.experimental_max_chase_atr
+        if multiple <= ZERO:
+            return None
+        rows = self.session.scalars(select(CandleORM).where(
+            CandleORM.symbol == Instrument.BTC_USD,
+            CandleORM.timeframe == Timeframe.FIFTEEN_MINUTES,
+            CandleORM.timestamp + timedelta(minutes=15) <= price_at,
+        ).order_by(CandleORM.timestamp.desc()).limit(100)).all()
+        structure = calculate_market_structure([CandleRepository._to_candle(row) for row in rows])
+        atr = dec(structure["atr14"]) if structure["atr14"] else None
+        if not rows or atr is None:
+            return "Experimental chase filter needs closed M15 ATR"
+        reference = rows[0].close
+        distance = entry-reference if side is PaperSide.LONG else reference-entry
+        if distance > atr*multiple:
+            return f"Experimental extended move: entry {distance:.2f} USD beyond M15 close, limit {atr*multiple:.2f}"
+        return None
+
     def open_position(
         self, proposal: OpenProposal, mark_price: Decimal, price_at: datetime,
         *, execution_key: str, decision_id: UUID | None = None,
         source: str = "kraken_spot_ticker", now: datetime | None = None,
         bid_price: Decimal | None = None, ask_price: Decimal | None = None,
+        pending_order_id: UUID | None = None,
     ) -> dict:
         now = now or utc_now()
         require_utc(now)
@@ -381,9 +497,19 @@ class PaperTradingService:
             return self._reject(account, execution_key, "Paper account is not ACTIVE", now, decision_id)
         if mark_price <= ZERO:
             return self._reject(account, execution_key, "Price must be positive", now, decision_id)
-        if price_at < now - timedelta(seconds=30) or price_at > now + timedelta(seconds=5):
+        pending_fill = pending_order_id is not None
+        if source == "pending_closed_1m_ohlc" and not pending_fill:
+            return self._reject(account, execution_key, "Pending fill requires a saved order", now, decision_id)
+        if pending_fill:
+            order = self.session.get(PaperPendingOrderORM, pending_order_id)
+            if (order is None or order.account_id != account.id or order.status != "PENDING" or
+                execution_key != f"pending-fill:{pending_order_id}"):
+                return self._reject(account, execution_key, "Pending order is not active or mismatched", now, decision_id)
+            if price_at <= order.updated_at or price_at > order.expires_at:
+                return self._reject(account, execution_key, "Pending fill outside active interval", now, decision_id)
+        if (not pending_fill and price_at < now - timedelta(seconds=30)) or price_at > now + timedelta(seconds=5):
             return self._reject(account, execution_key, "Ticker price is stale or future-dated", now, decision_id)
-        if price_at > proposal.valid_until or now > proposal.valid_until:
+        if price_at > proposal.valid_until or (now > proposal.valid_until and not pending_fill):
             return self._reject(account, execution_key, "Open proposal expired", now, decision_id)
         if decision_id:
             decision = self.session.get(AgentDecisionORM, decision_id)
@@ -396,51 +522,37 @@ class PaperTradingService:
         if profile is None or profile.status == "UNCONFIGURED":
             return self._reject(account, execution_key, "Fee profile is UNCONFIGURED", now, decision_id)
         rates = self._rates(profile)
+        if pending_fill and order.fee_profile_id != profile.id:
+            return self._reject(account, execution_key, "Pending fee profile changed; recreate order", now, decision_id)
+        if rates.execution_model != CFD_FIXED_20_USD and not self._allow_legacy_test_entries:
+            return self._reject(account, execution_key, "CFD20 profile must be activated for new entries", now, decision_id)
         if rates.market_type is not MarketType.SPOT_MARGIN:
             return self._reject(account, execution_key, "PERPETUAL requires explicit funding history", now, decision_id)
         positions = self._positions(account.id, lock=True)
         side = PaperSide(proposal.side.value)
         if any(p.side != side.value for p in positions):
             return self._reject(account, execution_key, "Opposing BTC/USD positions are disabled", now, decision_id)
+        quote_mid = (dec(bid_price) + dec(ask_price)) / 2 if bid_price is not None and ask_price is not None else mark_price
         entry = money(execution_price(mark_price, side, True, rates,
                                       bid=bid_price, ask=ask_price))
-        if self.risk.min_stop_m15_atr_multiple > ZERO:
-            rows = self.session.scalars(select(CandleORM).where(
-                CandleORM.symbol == Instrument.BTC_USD,
-                CandleORM.timeframe == Timeframe.FIFTEEN_MINUTES,
-                CandleORM.timestamp + timedelta(minutes=15) <= price_at,
-            ).order_by(CandleORM.timestamp.desc()).limit(100)).all()
-            structure = calculate_market_structure(
-                [CandleRepository._to_candle(row) for row in rows],
-                swing_candles=self.risk.stop_swing_m15_candles,
-            )
-            atr = dec(structure["atr14"]) if structure["atr14"] is not None else None
-            latest_m15_close = (datetime.fromisoformat(structure["timestamp"]) + timedelta(minutes=15)
-                                if structure["timestamp"] else None)
-            if (atr is None or proposal.stop_loss is None or structure["swing_low"] is None or
-                latest_m15_close is None or price_at - latest_m15_close > timedelta(minutes=30)):
-                return self._reject(account, execution_key,
-                                    "Fresh M15 ATR/swing data and stop loss required by strategy", now, decision_id)
-            buffer = atr * self.risk.stop_swing_atr_buffer
-            minimum_distance = atr * self.risk.min_stop_m15_atr_multiple
-            if side is PaperSide.LONG:
-                highest_allowed_stop = min(entry - minimum_distance,
-                                           dec(structure["swing_low"]) - buffer)
-                if proposal.stop_loss > highest_allowed_stop:
-                    return self._reject(account, execution_key,
-                                        f"SL too close for M15 structure; LONG SL must be <= {highest_allowed_stop:.2f}",
-                                        now, decision_id)
-            else:
-                lowest_allowed_stop = max(entry + minimum_distance,
-                                          dec(structure["swing_high"]) + buffer)
-                if proposal.stop_loss < lowest_allowed_stop:
-                    return self._reject(account, execution_key,
-                                        f"SL too close for M15 structure; SHORT SL must be >= {lowest_allowed_stop:.2f}",
-                                        now, decision_id)
+        if decision_id is not None and rates.execution_model == CFD_FIXED_20_USD:
+            trigger_error = self.validate_entry_trigger(proposal, side, entry, decision, rates)
+            if trigger_error:
+                return self._reject(account, execution_key, trigger_error, now, decision_id)
+        stop_error = self.validate_stop_structure(side, entry, proposal.stop_loss, price_at)
+        if stop_error:
+            return self._reject(account, execution_key, stop_error, now, decision_id)
+        chase_error = self.validate_chase(side, entry, price_at)
+        if chase_error:
+            return self._reject(account, execution_key, chase_error, now, decision_id)
         reserved = sum((p.reserved_margin for p in positions), ZERO)
-        gross = sum((gross_pnl(PaperSide(p.side), p.entry_price, mark_price, p.quantity_btc)
-                     for p in positions), ZERO)
-        equity = account.cash_balance + gross
+        equity = account.cash_balance + sum((
+            gross_pnl(PaperSide(p.side), p.entry_price,
+                      execution_price(quote_mid, PaperSide(p.side), False, FeeRates.from_dict(p.fee_snapshot)),
+                      p.quantity_btc) - p.quantity_btc *
+            execution_price(quote_mid, PaperSide(p.side), False, FeeRates.from_dict(p.fee_snapshot)) *
+            FeeRates.from_dict(p.fee_snapshot).trade_exit_fee_rate
+            for p in positions), ZERO)
         current_risk = sum((
             p.quantity_btc * abs(p.entry_price - p.stop_loss) +
             p.entry_notional * (
@@ -458,23 +570,36 @@ class PaperTradingService:
         )
         if quantity is None:
             return self._reject(account, execution_key, reason, now, decision_id)
-        margin = money(entry * quantity)  # max leverage is exactly 1x
-        initial_cost, cost_basis = entry_costs(rates, side, quantity, entry)
-        initial_cost = money(initial_cost)
-        post_equity = equity - initial_cost + gross_pnl(side, entry, mark_price, quantity) - (
-            quantity * mark_price * rates.trade_exit_fee_rate
-        )
+        immediate_exit = execution_price(quote_mid, side, False, rates)
         single_limit = self.risk.no_sl_max_margin if proposal.stop_loss is None else self.risk.max_position_margin
-        if (margin > post_equity * single_limit or
+        for _ in range(100):
+            if quantity <= ZERO:
+                break
+            margin = money(entry * quantity)  # max leverage is exactly 1x
+            initial_cost, cost_basis = entry_costs(rates, side, quantity, entry)
+            initial_cost = money(initial_cost)
+            post_equity = equity - initial_cost + gross_pnl(side, entry, immediate_exit, quantity) - (
+                quantity * immediate_exit * rates.trade_exit_fee_rate)
+            if (margin <= post_equity * single_limit and
+                reserved + margin <= post_equity * self.risk.max_total_margin and
+                account.cash_balance - reserved - margin - initial_cost >= post_equity * self.risk.min_free_margin):
+                break
+            quantity -= BTC_STEP
+        if (quantity <= ZERO or margin < self.risk.min_notional or
+            margin > post_equity * single_limit or
             reserved + margin > post_equity * self.risk.max_total_margin or
             account.cash_balance - reserved - margin - initial_cost < post_equity * self.risk.min_free_margin):
-            return self._reject(account, execution_key, "Post-cost margin or free-reserve limit would be breached", now, decision_id)
+            return self._reject(account, execution_key,
+                                f"Post-cost margin limit: required_margin={margin}, available_margin={account.cash_balance-reserved}, "
+                                f"estimated_close_cost={equity-post_equity}, max_quantity={quantity}, "
+                                f"min_notional={self.risk.min_notional}, risk_budget={equity*self.risk.max_risk_per_position}", now, decision_id)
         position_id = uuid4()
         position = PaperPositionORM(
             id=position_id, account_id=account.id, instrument=Instrument.BTC_USD.value,
             market_type=rates.market_type.value, side=side.value, status="OPEN",
-            entry_price=entry, entry_at=price_at, entry_candle_timestamp=latest_mark_at - MINUTE,
-            entry_source=("kraken_spot_mid_fixed_spread_paper" if bid_price is not None else
+            entry_price=entry, entry_at=price_at,
+            entry_candle_timestamp=price_at - MINUTE if pending_fill else latest_mark_at - MINUTE,
+            entry_source=(source if pending_fill else "kraken_spot_mid_fixed_spread_paper" if bid_price is not None else
                           "last_trade_fixed_spread_paper"),
             execution_key=execution_key, quantity_btc=quantity,
             entry_notional=margin, leverage=Decimal("1"), reserved_margin=margin,
@@ -494,12 +619,18 @@ class PaperTradingService:
         self._ledger(account, "ENTRY_COST", f"entry-cost:{position_id}", -initial_cost, ZERO, now, position_id)
         self._event(account.id, "OPENED", f"open:{position_id}", {
             "side": side.value, "entry_price": str(entry), "mark_price": str(mark_price),
-            "price_source": source, "quote_mode": ("fixed_spread_quote_mid" if bid_price is not None
+            "price_source": source, "quote_mode": ("pending_candle_mid" if pending_fill else
+                                                   "fixed_spread_quote_mid" if bid_price is not None
                                                    else "fixed_spread_last_trade"),
             "bid_price": str(bid_price) if bid_price is not None else None,
             "ask_price": str(ask_price) if ask_price is not None else None,
             "quantity_btc": str(quantity),
             "reserved_margin": str(margin), "costs": cost_basis,
+            "reference_mid": str(quote_mid),
+            "cfd_spread_usd_per_btc": str(rates.spread_usd_per_btc),
+            "execution_side": "BUY" if side is PaperSide.LONG else "SELL",
+            "execution_price": str(entry), "execution_model": rates.execution_model,
+            "fill_assumption": "closed_1m_ohlc" if pending_fill else "quote_mid" if bid_price is not None else "last_trade_mid_assumption",
             "fee_profile_version": rates.version, "fee_status": rates.status,
         }, now, position_id, decision_id)
         self.session.flush()
@@ -579,6 +710,8 @@ class PaperTradingService:
         theoretical_touch_at: datetime | None = None,
         reference_price_at: datetime | None = None,
         bid_price: Decimal | None = None, ask_price: Decimal | None = None,
+        barrier_fill_price: Decimal | None = None,
+        fill_assumption: str | None = None,
     ) -> dict:
         require_utc(price_at)
         if reason not in {"TAKE_PROFIT", "STOP_LOSS", "AGENT", "RISK_LIMIT", "TIMEOUT", "LIQUIDATION"}:
@@ -605,7 +738,7 @@ class PaperTradingService:
         self.apply_holding_costs(position, account, holding_through, mark_price)
         # PAPER assumption: a confirmed 1m touch fills at the exact TP/SL.
         # Discretionary exits use the configured spread around the quote midpoint.
-        exit_price = money(barrier if barrier is not None else
+        exit_price = money((barrier_fill_price if barrier_fill_price is not None else barrier) if barrier is not None else
                            execution_price(dec(mark_price), PaperSide(position.side), False, rates,
                                            bid=bid_price, ask=ask_price))
         gross = money(gross_pnl(PaperSide(position.side), position.entry_price, exit_price, position.quantity_btc))
@@ -642,6 +775,13 @@ class PaperTradingService:
             "bid_price": str(bid_price) if bid_price is not None else None,
             "ask_price": str(ask_price) if ask_price is not None else None,
             "source": source, "gross_pnl": str(gross),
+            "reference_mid": str((dec(bid_price) + dec(ask_price)) / 2 if bid_price is not None and ask_price is not None else mark_price),
+            "cfd_spread_usd_per_btc": str(rates.spread_usd_per_btc),
+            "execution_side": "SELL" if position.side == "LONG" else "BUY",
+            "execution_model": rates.execution_model,
+            "fill_assumption": fill_assumption or ("BARRIER_TOUCH_OHLC" if barrier is not None else
+                                                   "quote_mid" if bid_price is not None else "last_trade_mid_assumption"),
+            "fee_profile_version": rates.version,
             "paper_net_estimate_usd": str(position.realized_net_pnl),
             "exit_fee": str(exit_fee), "unfunded_loss": str(unpaid),
             "theoretical_touch_at": theoretical_touch_at.isoformat() if theoretical_touch_at else None,
@@ -687,25 +827,22 @@ class PaperTradingService:
         for index, candle in enumerate(candles):
             if candle.timestamp != start + MINUTE * index:
                 raise ValueError("Cannot verify first barrier because 1m candles are missing")
-            stop_hit = position.stop_loss is not None and (
-                candle.low <= position.stop_loss if position.side == "LONG" else candle.high >= position.stop_loss
-            )
-            target_hit = position.take_profit is not None and (
-                candle.high >= position.take_profit if position.side == "LONG" else candle.low <= position.take_profit
-            )
-            if stop_hit or target_hit:
-                first_hit = (candle, "STOP_LOSS" if stop_hit else "TAKE_PROFIT", stop_hit and target_hit)
+            rates = FeeRates.from_dict(position.fee_snapshot)
+            hit_reason, ambiguous, fill_price, assumption = barrier_touch(
+                PaperSide(position.side), candle, position.stop_loss, position.take_profit, rates)
+            if hit_reason:
+                first_hit = (candle, hit_reason, ambiguous, fill_price, assumption)
                 break
         if first_hit is None:
             raise ValueError("No recorded 1m candle touched a protective level before close")
-        candle, reason, ambiguous = first_hit
+        candle, reason, ambiguous, fill_price, assumption = first_hit
         if reason != expected_reason:
             raise ValueError(f"First barrier was {reason}, not {expected_reason}")
         barrier = position.stop_loss if reason == "STOP_LOSS" else position.take_profit
         rates = FeeRates.from_dict(position.fee_snapshot)
-        new_exit_fee = money(position.quantity_btc * barrier * rates.trade_exit_fee_rate)
+        new_exit_fee = money(position.quantity_btc * fill_price * rates.trade_exit_fee_rate)
         new_gross = money(gross_pnl(PaperSide(position.side), position.entry_price,
-                                    barrier, position.quantity_btc))
+                                    fill_price, position.quantity_btc))
         new_net = money(new_gross - position.initial_costs - position.accrued_holding_costs - new_exit_fee)
         old = {
             "close_price": str(position.close_price), "close_at": iso_utc(position.close_at),
@@ -717,7 +854,7 @@ class PaperTradingService:
         delta = money(new_net - position.realized_net_pnl)
         touch_at = (candle.timestamp + MINUTE).astimezone(timezone.utc)
         self._ledger(account, "CORRECTION", key, delta, ZERO, now, position.id)
-        position.close_price = barrier
+        position.close_price = fill_price
         position.close_at = touch_at
         position.close_source = "1m_ohlc_barrier_assumption"
         position.close_reason = reason
@@ -735,7 +872,7 @@ class PaperTradingService:
             "reason": "user_requested_exact_barrier_paper_fill",
             "old": old,
             "new": {
-                "close_price": str(barrier), "close_at": iso_utc(touch_at),
+                "close_price": str(fill_price), "close_at": iso_utc(touch_at),
                 "close_source": position.close_source, "close_reason": reason,
                 "realized_gross_pnl": str(new_gross), "realized_net_pnl": str(new_net),
                 "fee_total": str(position.fee_total),
@@ -743,10 +880,17 @@ class PaperTradingService:
             "barrier_candle_timestamp": iso_utc(candle.timestamp),
             "barrier_candle_high": str(candle.high), "barrier_candle_low": str(candle.low),
             "ambiguous_both_hit": ambiguous, "cash_adjustment_usd": str(delta),
+            "reference_mid": str(candle.open if assumption == "GAP_FILL_ASSUMPTION" else
+                                 (fill_price + rates.spread_usd_per_btc / 2 if position.side == "LONG" else
+                                  fill_price - rates.spread_usd_per_btc / 2)),
+            "cfd_spread_usd_per_btc": str(rates.spread_usd_per_btc),
+            "execution_side": "SELL" if position.side == "LONG" else "BUY",
+            "execution_price": str(fill_price), "execution_model": rates.execution_model,
+            "fill_assumption": assumption, "fee_profile_version": rates.version,
         }, now, position.id)
         self.session.flush()
         return {"status": "CORRECTED", "position_id": str(position.id),
-                "close_reason": reason, "close_price": str(barrier),
+                "close_reason": reason, "close_price": str(fill_price),
                 "realized_net_pnl": str(new_net), "cash_adjustment_usd": str(delta)}
 
     def process_decision(self, decision_id: UUID, ticker: dict | None,
@@ -766,6 +910,7 @@ class PaperTradingService:
             "decision": row.decision,
             "open_proposal": row.open_proposal,
             "position_actions": row.position_actions or [],
+            "pending_order_actions": row.pending_order_actions or [],
             "to_monitor": [],
             "text": row.text,
         })
@@ -775,12 +920,15 @@ class PaperTradingService:
                              "Decision action became stale", now, decision_id)
             if action.open_proposal:
                 self._reject(account, f"{decision_id}:open", "Open proposal became stale", now, decision_id)
+            if action.pending_order_actions:
+                self._event(account.id, "REJECTED", f"reject:{decision_id}:pending-stale",
+                            {"reason": "Pending order actions became stale"}, now, decision_id=decision_id)
             row.paper_status = "DONE"
             row.paper_result = {"status": "DONE", "reason": "Stale actions rejected"}
             return row.paper_result
         needs_price = action.open_proposal is not None or any(
             item.action is PositionActionType.CLOSE for item in action.position_actions
-        )
+        ) or any(item.action.value in {"CREATE", "AMEND"} for item in action.pending_order_actions)
         if needs_price and ticker is None:
             return {"status": "PENDING", "reason": "Fresh ticker required"}
         if ticker:
@@ -826,6 +974,11 @@ class PaperTradingService:
                 source=ticker["source"], now=now,
                 bid_price=bid_price, ask_price=ask_price,
             ))
+        if action.pending_order_actions:
+            from services.pending_orders import PendingOrderManager
+            manager = PendingOrderManager(self.session, self)
+            for index, item in enumerate(action.pending_order_actions):
+                results.append(manager.apply_action(item, decision_id, ticker, now, action_index=index))
         row.paper_status = "DONE"
         row.paper_result = {"status": "DONE", "results": results}
         self.session.flush()
@@ -882,16 +1035,9 @@ class PaperTradingService:
                 if candle.timestamp < start or position.status != "OPEN":
                     continue
                 next_candle = candles[index + 1] if index + 1 < len(candles) else None
-                stop_hit = position.stop_loss is not None and (
-                    candle.low <= position.stop_loss if position.side == "LONG"
-                    else candle.high >= position.stop_loss
-                )
-                target_hit = position.take_profit is not None and (
-                    candle.high >= position.take_profit if position.side == "LONG"
-                    else candle.low <= position.take_profit
-                )
-                ambiguous = stop_hit and target_hit
-                reason = "STOP_LOSS" if stop_hit else "TAKE_PROFIT" if target_hit else None
+                rates = FeeRates.from_dict(position.fee_snapshot)
+                reason, ambiguous, barrier_price, barrier_assumption = barrier_touch(
+                    PaperSide(position.side), candle, position.stop_loss, position.take_profit, rates)
                 if reason is None and candle.timestamp + MINUTE >= position.entry_at + timedelta(hours=self.risk.max_hold_hours):
                     reason = "TIMEOUT"
                 if reason is None:
@@ -923,10 +1069,14 @@ class PaperTradingService:
                         notes.append("AMBIGUOUS_BOTH_HIT: SL FIRST")
                     if not barrier_hit and next_candle is not None and next_candle.timestamp != candle.timestamp + MINUTE:
                         notes.append("GAP: next available candle open used")
-                    fill_reference = (position.stop_loss if reason == "STOP_LOSS" else position.take_profit) if barrier_hit else (
-                        next_candle.open if next_candle is not None else ticker_price
+                    fill_reference = (
+                        candle.open if barrier_assumption == "GAP_FILL_ASSUMPTION" else
+                        barrier_price + (rates.spread_usd_per_btc / 2 if position.side == "LONG" else
+                                         -rates.spread_usd_per_btc / 2)
+                    ) if barrier_hit and rates.execution_model == CFD_FIXED_20_USD else (
+                        barrier_price if barrier_hit else next_candle.open if next_candle is not None else ticker_price
                     )
-                    fill_at = processed_at if barrier_hit or next_candle is not None else ticker_at
+                    fill_at = (candle.timestamp + MINUTE).astimezone(timezone.utc) if barrier_hit else processed_at if next_candle is not None else ticker_at
                     reference_at = None if barrier_hit else (next_candle.timestamp if next_candle is not None else ticker_at)
                     source = ("1m_ohlc_barrier_assumption" if barrier_hit else
                               "next_1m_open_ohlc_backtest" if next_candle is not None else
@@ -939,6 +1089,8 @@ class PaperTradingService:
                         reference_price_at=reference_at.astimezone(timezone.utc) if reference_at else None,
                         bid_price=ticker_bid if not barrier_hit and next_candle is None else None,
                         ask_price=ticker_ask if not barrier_hit and next_candle is None else None,
+                        barrier_fill_price=barrier_price if barrier_hit else None,
+                        fill_assumption=barrier_assumption if barrier_hit else None,
                     )
                     position.last_evaluated_candle_timestamp = candle.timestamp
                     evaluated += 1

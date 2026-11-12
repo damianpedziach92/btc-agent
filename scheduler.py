@@ -23,19 +23,23 @@ def collect_market_data():
 
     try:
         import_candles()
-
-        from services.paper_orchestration import process_new_paper_candles, process_pending_decisions
-        from services.telegram_notifications import process_pending_notifications
+    except Exception:
+        logger.exception("Błąd pobierania świec; kontynuuję przetwarzanie zapisanych M1")
+    try:
+        from services.paper_orchestration import process_new_paper_candles, process_pending_decisions, process_pending_orders
+        from services.telegram_notifications import process_pending_notifications, process_pending_order_notifications
         from services.review_notifications import process_pending_review_notifications
         process_new_paper_candles()
+        process_pending_orders()
         process_pending_decisions()
         process_pending_notifications()
+        process_pending_order_notifications()
         process_pending_review_notifications()
 
         logger.info("Pobieranie zakończone")
 
     except Exception:
-        logger.exception("Błąd pobierania danych")
+        logger.exception("Błąd przetwarzania PAPER")
 
 
 def analyze_market():

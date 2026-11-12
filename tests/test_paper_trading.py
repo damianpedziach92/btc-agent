@@ -30,7 +30,8 @@ def paper():
     connection = engine.connect()
     transaction = connection.begin()
     session = Session(bind=connection, autoflush=False, expire_on_commit=False)
-    service = PaperTradingService(session, risk=RiskConfig(), account_name=f"test_{uuid4().hex}")
+    service = PaperTradingService(session, risk=RiskConfig(), account_name=f"test_{uuid4().hex}",
+                                  allow_legacy_test_entries=True)
     try:
         yield service
     finally:
@@ -413,7 +414,7 @@ def test_latest_closed_1m_bar_exits_before_next_agent_analysis(paper, side, high
     assert position.close_reason == reason
     assert position.close_source == "1m_ohlc_barrier_assumption"
     assert position.close_price == (position.stop_loss if reason == "STOP_LOSS" else position.take_profit)
-    assert position.close_at == processed_at
+    assert position.close_at == (T0 + timedelta(minutes=2))
     assert position.last_evaluated_candle_timestamp == T0 + timedelta(minutes=1)
     assert paper.process_new_candles(processed_at)["closed"] == 0
     closed_events = paper.session.scalars(select(PaperPositionEventORM).where(
@@ -524,9 +525,11 @@ def test_parallel_opens_do_not_overallocate_margin():
     account_name = f"test_{uuid4().hex}"
     with SessionLocal.begin() as session:
         service = PaperTradingService(session, risk=RiskConfig(), account_name=account_name)
-        mark, mark_at = service._latest_mark()
-        assert mark is not None
-        now = mark_at.astimezone(timezone.utc) + timedelta(seconds=10)
+        now = T0 + timedelta(days=uuid4().int % 10000)
+        mark = D("74000")
+        for minutes in (3, 2, 1):
+            candle(session, now - timedelta(minutes=minutes),
+                   open_="74000", high="74001", low="73999", close="74000")
         account = service.seed_account(now)
         service.configure_fee_profile(rates(), now)
         account_id = account.id
@@ -535,6 +538,7 @@ def test_parallel_opens_do_not_overallocate_margin():
             with SessionLocal.begin() as session:
                 service = PaperTradingService(session, risk=RiskConfig(), account_name=account_name)
                 p = proposal("LONG", mark * D("0.95"), mark * D("1.05"), now + timedelta(minutes=5))
+                service._allow_legacy_test_entries = True
                 return service.open_position(p, mark, now, execution_key=f"parallel:{account_name}:{index}", now=now)
 
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -551,6 +555,11 @@ def test_parallel_opens_do_not_overallocate_margin():
                           PaperFeeProfileORM, PaperAccountORM):
                 session.execute(delete(model).where(model.account_id == account_id) if model is not PaperAccountORM
                                 else delete(model).where(model.id == account_id))
+            session.execute(delete(CandleORM).where(
+                CandleORM.symbol == Instrument.BTC_USD,
+                CandleORM.timeframe == Timeframe.ONE_MINUTE,
+                CandleORM.timestamp.in_([now - timedelta(minutes=m) for m in (3, 2, 1)]),
+            ))
 
 
 def test_auto_stop_wins_over_late_agent_close(paper):

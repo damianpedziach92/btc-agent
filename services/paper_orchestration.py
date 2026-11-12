@@ -22,7 +22,7 @@ def process_pending_decisions() -> list[dict]:
     for decision in pending:
         needs_price = decision.open_proposal is not None or any(
             item.get("action") == "CLOSE" for item in decision.position_actions or []
-        )
+        ) or any(item.get("action") in {"CREATE", "AMEND"} for item in decision.pending_order_actions or [])
         ticker = MarketTools().get_price(Instrument.BTC_USD) if needs_price else None
         with SessionLocal.begin() as session:
             result = PaperTradingService(session).process_decision(decision.id, ticker)
@@ -49,3 +49,9 @@ def process_new_paper_candles() -> dict:
     if result["evaluated"] or result["closed"] or result["pending_price"]:
         logger.info("Paper 1m processing: %s", result)
     return result
+
+
+def process_pending_orders() -> dict:
+    from services.pending_orders import PendingOrderManager
+    with SessionLocal.begin() as session:
+        return PendingOrderManager(session).process()

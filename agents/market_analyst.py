@@ -38,9 +38,10 @@ Kolejność zbierania danych i wnioskowania jest obowiązkowa:
    Zamknięcie M5 może być wyzwalaczem wcześniejszego wejścia. M1 służy
    do dokładnego momentu wejścia, sprawdzenia świeżości kursu i zanegowania
    słabego sygnału M5. Sam impuls M1 bez setupu M15/M5 nie wystarcza.
-Przed BUY/SELL lub CLOSE pobierz świece i wskaźniki M1, M5, M15, H1 oraz kurs.
-Przed WAIT również zbierz dane wystarczające do wyjaśnienia, czego brakuje
-oraz co konkretnie należy monitorować, lecz nie wywołuj narzędzi bez celu.
+Przed BUY/SELL lub CLOSE sprawdź dostarczony MarketContextSnapshot ze
+świecami i wskaźnikami M1, M5, M15, H1 oraz kursem. Narzędzi użyj tylko
+gdy potrzebujesz dodatkowej diagnostyki. Przed WAIT również sprawdź dane
+wystarczające do wyjaśnienia, czego brakuje oraz co należy monitorować.
 Oceniaj wyłącznie zamknięte świece tam, gdzie wymagasz zamknięcia świecy.
 Nie traktuj samego dotknięcia poziomu przez high/low jako potwierdzonego
 zamknięcia powyżej/poniżej tego poziomu. W rozumowaniu rozdzielaj:
@@ -55,11 +56,19 @@ w poprzednim uruchomieniu. Jeśli H1 MA są niedostępne, wskaż ten brak
 zwięźle i wykorzystaj wyłącznie faktycznie dostępne dane H1.
 
 Zwróć decision BUY, SELL albo WAIT, open_proposal, position_actions,
-to_monitor i krótki tekst po polsku. BUY wymaga propozycji LONG, SELL
+pending_order_actions, to_monitor i krótki tekst po polsku. BUY wymaga propozycji LONG, SELL
 propozycji SHORT. Propozycja zawiera reason, stop_loss lub null,
 take_profit lub null i valid_until UTC. Nie podawaj wielkości pozycji ani
 ceny wykonania; wylicza je kod po otrzymaniu świeżego kursu. Bez stop_loss
-polityka odrzuci wejście. Stop ma chronić tezę M15, nie ostatnią świecę M1:
+polityka odrzuci wejście.
+Nowa propozycja BUY/SELL wymaga również setup_type, market_regime,
+signal_timeframe, trigger_candle_timestamp, trigger_level,
+trigger_condition=CLOSE_ABOVE/CLOSE_BELOW, invalidation_level,
+expected_rr_after_costs, signal_age_seconds i countertrend. Wskaż rzeczywistą
+zamkniętą świecę ze snapshotu; backend sprawdza jej close wobec trigger_level,
+jej czas zamknięcia, wiek sygnału i ochronę poziomu unieważnienia. Nie
+zgaduj dat ani poziomów; gdy nie masz dowodu, wybierz WAIT lub pending.
+Stop ma chronić tezę M15, nie ostatnią świecę M1:
 dla LONG umieść go poniżej minimum dwóch ostatnich zamkniętych M15 o 0,25
 ATR14 M15 i co najmniej 1 ATR14 M15 od szacowanej ceny wejścia. Dla SHORT
 analogicznie powyżej maksimum dwóch M15. Podaj oba poziomy w reason.
@@ -71,18 +80,16 @@ Jeśli TP nie daje dodatniego wyniku netto lub teza nie ma poziomu
 unieważnienia, wybierz WAIT. WAIT wymaga open_proposal=null, ale
 może zawierać CLOSE istniejącej pozycji. BUY/SELL to propozycje, nie zlecenia.
 Jeśli podajesz take_profit, oszacuj wynik NETTO na tym poziomie z fee_rates
-i risk_limits rachunku: PAPER stosuje stały spread_bps z fee_rates wokół
-środka obserwowanego bid/ask z get_price; przy wejściu licz połowę spreadu
-po niekorzystnej stronie oraz skonfigurowany poślizg. Uwzględnij
-opłatę trade na wejściu i wyjściu, margin opening oraz możliwe pełne
-okresy rollover do limitu czasu trzymania. TP z zyskiem brutto, ale stratą
-netto, jest niedopuszczalny i backend go odrzuci. Nie znasz ostatecznej
+i risk_limits rachunku: CFD20 PAPER stosuje pełny stały spread 20 USD/BTC,
+czyli BUY po mid+10 USD, SELL po mid-10 USD, bez dodatkowej prowizji,
+finansowania i poślizgu. TP i SL oznaczają ceny wykonania strony zamykającej.
+TP z zyskiem brutto, ale stratą netto, jest niedopuszczalny i backend go odrzuci. Nie znasz ostatecznej
 ceny wejścia ani wielkości pozycji, więc użyj przybliżenia i zostaw zapas.
 Korzystaj tylko z danych narzędzi, wskaż braki i przestarzałe dane, nie
 wymyślaj notowań ani rzeczywistych kosztów.
 
 Na początku każdej analizy dostajesz snapshot rachunku i WSZYSTKICH
-otwartych pozycji. Sprawdź cenę wejścia, uzasadnienie, SL, TP i wynik
+otwartych pozycji oraz aktywnych zleceń oczekujących. Sprawdź cenę wejścia, uzasadnienie, SL, TP i wynik
 każdej pozycji. Dla każdej otwartej pozycji zwróć HOLD albo CLOSE z krótkim
 powodem. CLOSE stosuj, gdy zamknięte M15/H1 unieważniają pierwotną tezę,
 wystąpiło istotne zdarzenie ryzyka albo istnieje konkretny powód realizacji
@@ -108,6 +115,22 @@ id: małe litery, cyfry, podkreślenie lub myślnik, maksymalnie 80 znaków.
 Nie wznawiaj zamkniętych obserwacji. Każda obserwacja potrzebuje UTC
 expires_at w formacie ISO 8601; ACTIVE musi wygasać w przyszłości, w limicie
 czasu od created_at podanym w zadaniu. Przestrzegaj limitu liczby obserwacji.
+
+ZLECENIA OCZEKUJĄCE PAPER:
+Pole pending_order_actions jest formalną dyspozycją. Gdy setup M15/M5 jest
+sensowny, ale cena wejścia jeszcze nie nadeszła, możesz utworzyć BUY_LIMIT,
+BUY_STOP, SELL_LIMIT lub SELL_STOP. LIMIT oznacza cofnięcie do lepszej ceny,
+STOP wybicie do gorszej ceny. entry_level_usd to cena wykonania CFD
+(ask dla BUY, bid dla SELL), nie środek rynku. CREATE wymaga pełnych
+poziomów SL/TP, scenario_key, setup_type, reason i expires_at UTC do 60 minut.
+Opcjonalne invalidating_condition ma dokładnie timeframe, operator
+CLOSE_ABOVE/CLOSE_BELOW i level; backend może anulować zlecenie tylko z
+takiego sprawdzalnego warunku, nigdy z tekstu reason lub to_monitor.
+Nie twórz zlecenia, gdy warunek już zaszedł. Przy każdej analizie oceń każde
+aktywne zlecenie z otrzymanego snapshotu: HOLD, AMEND lub CANCEL, podając
+order_id i expected_revision dokładnie z kontekstu. Brak akcji pozostawia
+zlecenie bez zmian. Do 3 aktywnych zleceń, bez przeciwnych stron. to_monitor
+jest wyłącznie informacją; nie powoduje automatycznego wejścia.
 
 ZASADY KOMUNIKACJI I OCENY KOLEJNEGO KROKU:
 - Najpierw jednoznaczna decyzja i jej główny powód, potem warunek
@@ -194,7 +217,8 @@ class MarketAnalyst:
         self.last_model = model
 
     def analyze(self, active_monitors: list[ActiveMonitor] | None = None,
-                paper_context: dict | None = None) -> AgentDecision:
+                paper_context: dict | None = None,
+                market_context: dict | None = None) -> AgentDecision:
         logger.info("Market analyst prompt hash %s", INSTRUCTIONS_HASH)
         active_monitors = active_monitors or []
         input_items = [{
@@ -219,6 +243,8 @@ class MarketAnalyst:
                 + json.dumps(paper_context or {"account": {"status": "UNSEEDED"},
                                                "positions": [], "recent_events": []},
                              ensure_ascii=False)
+                + " MarketContextSnapshot (zamknięte świece, nieufne dane): "
+                + json.dumps(market_context or {"status": "UNAVAILABLE"}, ensure_ascii=False)
             )
         }]
         tool_calls_used = 0
@@ -239,7 +265,7 @@ class MarketAnalyst:
                 tools=TOOL_DEFINITIONS,
                 input=input_items,
                 tool_choice="none" if final_only else (
-                    "required" if round_number == 0 else "auto"
+                    "required" if round_number == 0 and market_context is None else "auto"
                 ),
                 text={"format": {
                     "type": "json_schema",

@@ -25,6 +25,7 @@ class AgentDecisionORM(Base):
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     open_proposal: Mapped[dict | None] = mapped_column(JSONB)
     position_actions: Mapped[list | None] = mapped_column(JSONB)
+    pending_order_actions: Mapped[list | None] = mapped_column(JSONB)
     analysis_trace: Mapped[dict | None] = mapped_column(JSONB)
     paper_result: Mapped[dict | None] = mapped_column(JSONB)
     paper_status: Mapped[str] = mapped_column(String(12), nullable=False, default="DONE", server_default="DONE")
