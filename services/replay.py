@@ -31,14 +31,6 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _atr(rows: list[CandleORM], count: int = 14) -> Decimal | None:
-    if len(rows) < count + 1:
-        return None
-    values = [max(row.high-row.low, abs(row.high-prev.close), abs(row.low-prev.close))
-              for prev, row in zip(rows[-count-1:-1], rows[-count:])]
-    return sum(values, ZERO) / count
-
-
 def _mean(values: list[Decimal]) -> Decimal:
     return sum(values, ZERO) / len(values)
 
@@ -108,6 +100,24 @@ class Replay:
                 if side is PaperSide.LONG else
                 stop >= max(entry+minimum, dec(structure["swing_high"])+buffer))
 
+    def _m15_stop_ok(self, at: datetime, side: PaperSide, entry: Decimal,
+                     stop: Decimal) -> bool:
+        if self.risk.min_stop_m15_atr_multiple <= ZERO:
+            return True
+        rows = self._available(Timeframe.FIFTEEN_MINUTES, at, 100)
+        if not rows or at - (_utc(rows[-1].timestamp) + timedelta(minutes=15)) > timedelta(minutes=30):
+            return False
+        structure = calculate_market_structure([CandleRepository._to_candle(row) for row in rows],
+                                                swing_candles=self.risk.stop_swing_m15_candles)
+        if structure["atr14"] is None or structure["swing_low"] is None:
+            return False
+        atr = dec(structure["atr14"])
+        buffer = atr*self.risk.stop_swing_atr_buffer
+        minimum = atr*self.risk.min_stop_m15_atr_multiple
+        return (stop <= min(entry-minimum, dec(structure["swing_low"])-buffer)
+                if side is PaperSide.LONG else
+                stop >= max(entry+minimum, dec(structure["swing_high"])+buffer))
+
     def _scalp_risk_ok(self, trades: list[dict], cash: Decimal,
                        at: datetime, openings: list[datetime]) -> bool:
         today = [trade for trade in trades if datetime.fromisoformat(trade["exit_at"]).date() == at.date()]
@@ -172,11 +182,14 @@ class Replay:
             return None
         if at.minute % 15 or at.second:
             return None
-        m15 = self._available(Timeframe.FIFTEEN_MINUTES, at, 23)
+        m15_full = self._available(Timeframe.FIFTEEN_MINUTES, at, 201)
+        m15 = m15_full[-23:]
         h1 = self._available(Timeframe.ONE_HOUR, at, 3)
         if len(m15) < 22:
             return None
-        atr = _atr(m15)
+        structure = calculate_market_structure([CandleRepository._to_candle(row) for row in m15_full],
+                                               swing_candles=self.risk.stop_swing_m15_candles)
+        atr = dec(structure["atr14"]) if structure["atr14"] is not None else None
         if atr is None or atr <= ZERO:
             return None
         previous = m15[-2]
@@ -225,14 +238,16 @@ class Replay:
             raise ValueError(f"Unknown strategy {strategy}")
         if side is None:
             return None
-        swing = m15[-2:]
+        swing = m15[-self.risk.stop_swing_m15_candles:]
         if side is PaperSide.LONG:
-            stop = min(row.low for row in swing) - atr * Decimal("0.25")
+            stop = min(min(row.low for row in swing) - atr*self.risk.stop_swing_atr_buffer,
+                       current.close - atr*self.risk.min_stop_m15_atr_multiple)
             if stop >= current.close:
                 return None
             target = current.close + (current.close - stop) * 2
         else:
-            stop = max(row.high for row in swing) + atr * Decimal("0.25")
+            stop = max(max(row.high for row in swing) + atr*self.risk.stop_swing_atr_buffer,
+                       current.close + atr*self.risk.min_stop_m15_atr_multiple)
             if stop <= current.close:
                 return None
             target = current.close - (stop - current.close) * 2
@@ -358,7 +373,8 @@ class Replay:
                                 position_count=0, rates=self.rates)
                             rr = risk_reward_for_rates(self.rates, side, entry, stop, target,
                                                        Decimal("1"))["rr_ratio"]
-                            if quantity is None or rr is None or rr < MIN_NET_RISK_REWARD:
+                            if (quantity is None or rr is None or rr < MIN_NET_RISK_REWARD or
+                                not self._m15_stop_ok(at, side, entry, stop)):
                                 rejected += 1
                             else:
                                 accepted += 1
