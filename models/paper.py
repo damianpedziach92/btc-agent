@@ -8,6 +8,10 @@ ZERO = Decimal("0")
 ONE = Decimal("1")
 BTC_STEP = Decimal("0.00000001")
 MONEY_STEP = Decimal("0.000000000001")
+CFD_SPREAD_USD_PER_BTC = Decimal("20")
+MIN_NET_RISK_REWARD = Decimal("1.5")
+CFD_FIXED_20_USD = "CFD_FIXED_20_USD"
+LEGACY_BPS = "LEGACY_BPS"
 
 
 def dec(value: str | int | Decimal) -> Decimal:
@@ -45,6 +49,19 @@ class RiskConfig:
     emergency_drawdown: Decimal = Decimal("0.10")
     max_candle_age_seconds: int = 150
     min_consecutive_1m: int = 3
+    min_stop_m15_atr_multiple: Decimal = Decimal("0")
+    stop_swing_m15_candles: int = 2
+    stop_swing_atr_buffer: Decimal = Decimal("0")
+    experimental_min_rr_after_costs: Decimal = ZERO
+    experimental_max_chase_atr: Decimal = ZERO
+    pending_max_active: int = 3
+    pending_max_ttl_minutes: int = 60
+    pending_max_distance_usd: Decimal = Decimal("2000")
+    scalp_max_risk_per_position: Decimal = Decimal("0.01")
+    scalp_daily_loss_stop: Decimal = Decimal("0.03")
+    scalp_max_consecutive_losses: int = 3
+    scalp_loss_cooldown_minutes: int = 15
+    scalp_max_openings_per_hour: int = 4
 
     @classmethod
     def from_env(cls) -> "RiskConfig":
@@ -67,12 +84,26 @@ class RiskConfig:
             emergency_drawdown=dec(get("EMERGENCY_DRAWDOWN", "0.10")),
             max_candle_age_seconds=int(get("MAX_CANDLE_AGE_SECONDS", "150")),
             min_consecutive_1m=int(get("MIN_CONSECUTIVE_1M", "3")),
+            min_stop_m15_atr_multiple=dec(get("MIN_STOP_M15_ATR_MULTIPLE", "0")),
+            stop_swing_m15_candles=int(get("STOP_SWING_M15_CANDLES", "2")),
+            stop_swing_atr_buffer=dec(get("STOP_SWING_ATR_BUFFER", "0")),
+            experimental_min_rr_after_costs=dec(get("EXPERIMENTAL_MIN_RR_AFTER_COSTS", "0")),
+            experimental_max_chase_atr=dec(get("EXPERIMENTAL_MAX_CHASE_ATR", "0")),
+            pending_max_active=int(get("PENDING_MAX_ACTIVE", "3")),
+            pending_max_ttl_minutes=int(get("PENDING_MAX_TTL_MINUTES", "60")),
+            pending_max_distance_usd=dec(get("PENDING_MAX_DISTANCE_USD", "2000")),
+            scalp_max_risk_per_position=dec(get("SCALP_MAX_RISK_PER_POSITION", "0.01")),
+            scalp_daily_loss_stop=dec(get("SCALP_DAILY_LOSS_STOP", "0.03")),
+            scalp_max_consecutive_losses=int(get("SCALP_MAX_CONSECUTIVE_LOSSES", "3")),
+            scalp_loss_cooldown_minutes=int(get("SCALP_LOSS_COOLDOWN_MINUTES", "15")),
+            scalp_max_openings_per_hour=int(get("SCALP_MAX_OPENINGS_PER_HOUR", "4")),
         )
         fractions = (
             config.max_risk_per_position, config.max_total_risk,
             config.max_position_margin, config.max_total_margin,
             config.min_free_margin, config.no_sl_max_margin,
             config.emergency_drawdown,
+            config.scalp_max_risk_per_position, config.scalp_daily_loss_stop,
         )
         if any(not ZERO < value <= ONE for value in fractions):
             raise ValueError("Paper risk fractions must be between 0 and 1")
@@ -83,6 +114,16 @@ class RiskConfig:
         if (config.min_notional <= ZERO or config.min_tp_net_profit_usd <= ZERO or
             config.max_candle_age_seconds < 1 or config.min_consecutive_1m < 1):
             raise ValueError("Paper minimum notional, TP net profit and candle age must be positive")
+        if (config.min_stop_m15_atr_multiple < ZERO or config.stop_swing_atr_buffer < ZERO or
+            config.experimental_min_rr_after_costs < ZERO or
+            config.experimental_max_chase_atr < ZERO or
+            config.pending_max_distance_usd <= ZERO or not 1 <= config.pending_max_active <= 10 or
+            not 1 <= config.pending_max_ttl_minutes <= 240 or
+            config.stop_swing_m15_candles < 1):
+            raise ValueError("Paper M15 stop configuration must be nonnegative with a positive swing length")
+        if (config.scalp_max_consecutive_losses < 1 or config.scalp_loss_cooldown_minutes < 0 or
+            config.scalp_max_openings_per_hour < 1):
+            raise ValueError("Paper scalp limits must be positive")
         return config
 
     def as_dict(self) -> dict:
@@ -101,6 +142,8 @@ class FeeRates:
     rollover_rate_per_4h: Decimal
     slippage_bps: Decimal
     spread_bps: Decimal
+    execution_model: str = LEGACY_BPS
+    spread_usd_per_btc: Decimal = ZERO
 
     def as_dict(self) -> dict:
         return {key: value.value if isinstance(value, Enum) else str(value) if isinstance(value, Decimal) else value
@@ -116,7 +159,16 @@ class FeeRates:
             margin_opening_fee_rate=dec(data["margin_opening_fee_rate"]),
             rollover_rate_per_4h=dec(data["rollover_rate_per_4h"]),
             slippage_bps=dec(data["slippage_bps"]), spread_bps=dec(data["spread_bps"]),
+            execution_model=data.get("execution_model", LEGACY_BPS),
+            spread_usd_per_btc=dec(data.get("spread_usd_per_btc", "0")),
         )
+
+
+def cfd20_rates() -> FeeRates:
+    return FeeRates(
+        MarketType.SPOT_MARGIN, "ESTIMATED", "user_requested_cfd_fixed_20_usd_spread", 1,
+        ZERO, ZERO, ZERO, ZERO, ZERO, ZERO, CFD_FIXED_20_USD, CFD_SPREAD_USD_PER_BTC,
+    )
 
 
 def execution_price(mark: Decimal, side: PaperSide, opening: bool, rates: FeeRates,
@@ -134,12 +186,67 @@ def execution_price(mark: Decimal, side: PaperSide, opening: bool, rates: FeeRat
         reference = (bid + ask) / 2
     else:
         reference = mark
+    if rates.execution_model == CFD_FIXED_20_USD:
+        return reference + (rates.spread_usd_per_btc / 2 if buying else -rates.spread_usd_per_btc / 2)
+    if rates.execution_model != LEGACY_BPS:
+        raise ValueError("Unknown PAPER execution model")
     impact = (rates.spread_bps / 2 + rates.slippage_bps) / Decimal("10000")
     return reference * (ONE + impact if buying else ONE - impact)
 
 
+def barrier_touch(side: PaperSide, candle, stop_loss: Decimal | None,
+                  take_profit: Decimal | None, rates: FeeRates) -> tuple[str | None, bool, Decimal | None, str]:
+    """Return first conservative OHLC barrier and executable fill price."""
+    offset = rates.spread_usd_per_btc / 2 if rates.execution_model == CFD_FIXED_20_USD else ZERO
+    low = candle.low - offset if side is PaperSide.LONG else candle.low + offset
+    high = candle.high - offset if side is PaperSide.LONG else candle.high + offset
+    opened = candle.open - offset if side is PaperSide.LONG else candle.open + offset
+    stop_hit = stop_loss is not None and (low <= stop_loss if side is PaperSide.LONG else high >= stop_loss)
+    target_hit = take_profit is not None and (high >= take_profit if side is PaperSide.LONG else low <= take_profit)
+    if stop_hit:
+        worse_gap = rates.execution_model == CFD_FIXED_20_USD and (
+            opened < stop_loss if side is PaperSide.LONG else opened > stop_loss)
+        return "STOP_LOSS", target_hit, opened if worse_gap else stop_loss, "GAP_FILL_ASSUMPTION" if worse_gap else "BARRIER_TOUCH_OHLC"
+    if target_hit:
+        return "TAKE_PROFIT", False, take_profit, "BARRIER_TOUCH_OHLC"
+    return None, False, None, "NO_TOUCH"
+
+
 def gross_pnl(side: PaperSide, entry: Decimal, exit_price: Decimal, quantity: Decimal) -> Decimal:
     return (exit_price - entry if side is PaperSide.LONG else entry - exit_price) * quantity
+
+
+def calculate_risk_reward(
+    side: PaperSide, entry_execution_price: Decimal, stop_execution_price: Decimal,
+    target_execution_price: Decimal, quantity: Decimal, entry_costs: Decimal,
+    exit_costs: Decimal, target_exit_costs: Decimal | None = None,
+) -> dict[str, Decimal | None]:
+    """Net R:R from executable prices; SL/TP already include the CFD spread."""
+    if target_exit_costs is None:
+        target_exit_costs = exit_costs
+    values = (entry_execution_price, stop_execution_price, target_execution_price,
+              quantity, entry_costs, exit_costs, target_exit_costs)
+    if any(not dec(value).is_finite() for value in values) or quantity <= ZERO:
+        raise ValueError("Risk/reward inputs must be finite and quantity positive")
+    stop_net = gross_pnl(side, entry_execution_price, stop_execution_price, quantity) - entry_costs - exit_costs
+    target_net = gross_pnl(side, entry_execution_price, target_execution_price, quantity) - entry_costs - target_exit_costs
+    risk = -stop_net
+    reward = target_net
+    valid_levels = (entry_execution_price > ZERO and stop_execution_price > ZERO and
+                    target_execution_price > ZERO and
+                    (stop_execution_price < entry_execution_price < target_execution_price
+                     if side is PaperSide.LONG else
+                     target_execution_price < entry_execution_price < stop_execution_price))
+    return {"risk_net_usd": risk, "reward_net_usd": reward,
+            "rr_ratio": reward / risk if valid_levels and risk > ZERO and reward > ZERO else None}
+
+
+def risk_reward_for_rates(rates: FeeRates, side: PaperSide, entry: Decimal,
+                          stop: Decimal, target: Decimal, quantity: Decimal) -> dict[str, Decimal | None]:
+    opening = entry_costs(rates, side, quantity, entry)[0]
+    return calculate_risk_reward(side, entry, stop, target, quantity, opening,
+                                 quantity * stop * rates.trade_exit_fee_rate,
+                                 quantity * target * rates.trade_exit_fee_rate)
 
 
 def entry_costs(rates: FeeRates, side: PaperSide, quantity: Decimal, entry: Decimal) -> tuple[Decimal, dict]:
@@ -201,6 +308,7 @@ class RiskEngine:
         take_profit: Decimal | None, equity: Decimal, cash: Decimal,
         reserved: Decimal, current_risk: Decimal, position_count: int,
         rates: FeeRates,
+        risk_fraction_override: Decimal | None = None,
     ) -> tuple[Decimal | None, str]:
         c = self.config
         if rates.status == "UNCONFIGURED":
@@ -218,35 +326,43 @@ class RiskEngine:
                                         (side is PaperSide.SHORT and take_profit >= entry)):
             return None, "Take profit must be on the profit side of entry"
 
-        available = min(cash - reserved, equity * c.max_total_margin - reserved,
-                        equity * (ONE - c.min_free_margin) - reserved)
         single_limit = c.no_sl_max_margin if stop_loss is None else c.max_position_margin
-        estimated_loss_rate = (
-            rates.trade_entry_fee_rate + rates.trade_exit_fee_rate +
-            (rates.margin_opening_fee_rate if rates.market_type is MarketType.SPOT_MARGIN else ZERO) +
-            (rates.spread_bps / 2 + rates.slippage_bps) / Decimal("10000")
-        )
-        cap = min(
-            available,
-            equity * single_limit / (ONE + single_limit * estimated_loss_rate),
-            (equity * c.max_total_margin - reserved) / (ONE + c.max_total_margin * estimated_loss_rate),
-        )
+        # equity is marked at executable liquidation prices before this entry.
+        if rates.execution_model == CFD_FIXED_20_USD:
+            exit_at_same_mid = entry - rates.spread_usd_per_btc if side is PaperSide.LONG else entry + rates.spread_usd_per_btc
+        else:
+            impact = (rates.spread_bps / 2 + rates.slippage_bps) / Decimal("10000")
+            mid = entry / (ONE + impact if side is PaperSide.LONG else ONE - impact)
+            exit_at_same_mid = execution_price(mid, side, False, rates)
+        entry_cost_per_btc = entry_costs(rates, side, ONE, entry)[0]
+        immediate_cost_per_btc = (entry_cost_per_btc +
+                                  ONE * exit_at_same_mid * rates.trade_exit_fee_rate -
+                                  gross_pnl(side, entry, exit_at_same_mid, ONE))
+        # Solve the post-cost margin inequalities for q; rounding down keeps
+        # the later exact checks within limits even at the boundary.
+        limits = [
+            (cash - reserved - equity * c.min_free_margin) /
+            (entry + entry_cost_per_btc - c.min_free_margin * immediate_cost_per_btc),
+            equity * single_limit / (entry + single_limit * immediate_cost_per_btc),
+            (equity * c.max_total_margin - reserved) /
+            (entry + c.max_total_margin * immediate_cost_per_btc),
+        ]
+        cap_quantity = min(limits)
         if stop_loss is not None:
-            risk_budget = min(equity * c.max_risk_per_position,
+            risk_budget = min(equity * (min(c.max_risk_per_position, risk_fraction_override)
+                                        if risk_fraction_override is not None else c.max_risk_per_position),
                               equity * c.max_total_risk - current_risk)
-            per_btc = abs(entry - stop_loss) + entry * (
-                rates.trade_entry_fee_rate + rates.trade_exit_fee_rate +
-                (rates.margin_opening_fee_rate + rates.rollover_rate_per_4h
-                 if rates.market_type is MarketType.SPOT_MARGIN else ZERO)
-            )
+            per_btc = abs(entry - stop_loss) + entry_cost_per_btc + stop_loss * rates.trade_exit_fee_rate + (
+                entry * rates.rollover_rate_per_4h if rates.market_type is MarketType.SPOT_MARGIN else ZERO)
             if risk_budget <= ZERO or per_btc <= ZERO:
                 return None, "Aggregate stop risk limit reached"
-            cap = min(cap, risk_budget * entry / per_btc)
-        if cap < c.min_notional:
-            return None, "Insufficient free margin or risk budget"
-        quantity = (cap / entry).quantize(BTC_STEP, rounding=ROUND_DOWN)
+            cap_quantity = min(cap_quantity, risk_budget / per_btc)
+        quantity = cap_quantity.quantize(BTC_STEP, rounding=ROUND_DOWN)
         if quantity <= ZERO or quantity * entry < c.min_notional:
-            return None, "Calculated quantity below minimum notional"
+            return None, (f"Calculated quantity below minimum notional: required_margin={c.min_notional}, "
+                          f"available_margin={max(ZERO, cash-reserved)}, estimated_close_cost={immediate_cost_per_btc}, "
+                          f"max_quantity={max(ZERO, quantity)}, min_notional={c.min_notional}, "
+                          f"risk_budget={risk_budget if stop_loss is not None else 'n/a'}")
         if take_profit is not None:
             hold_hours = c.no_sl_max_hours if stop_loss is None else c.max_hold_hours
             rollover_periods = hold_hours // 4
@@ -259,4 +375,9 @@ class RiskEngine:
                     f"entry/exit fees and {rollover_periods} possible rollover periods; "
                     f"minimum is {c.min_tp_net_profit_usd} USD"
                 )
+            if rates.execution_model == CFD_FIXED_20_USD and stop_loss is not None and c.experimental_min_rr_after_costs > ZERO:
+                risk_per_btc = abs(entry-stop_loss) + entry_cost_per_btc + stop_loss*rates.trade_exit_fee_rate
+                if projected_net / (risk_per_btc*quantity) < c.experimental_min_rr_after_costs:
+                    return None, (f"RR after costs below experimental minimum {c.experimental_min_rr_after_costs}; "
+                                  f"actual={projected_net/(risk_per_btc*quantity):.3f}")
         return quantity, "ACCEPTED"

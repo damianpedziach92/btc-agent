@@ -135,8 +135,8 @@ def test_telegram_outbox_retries_failure_then_marks_sent_once(monkeypatch):
             expires_at=datetime(2036, 1, 1, tzinfo=timezone.utc),
             created_by_decision_id=decision_id,
         ))
-        assert enqueue_decision_notification(session, decision_id)
-        assert enqueue_decision_notification(session, decision_id)
+        assert not enqueue_decision_notification(session, decision_id)
+        assert not enqueue_decision_notification(session, decision_id)
 
     class FakeClient:
         def __init__(self):
@@ -150,24 +150,11 @@ def test_telegram_outbox_retries_failure_then_marks_sent_once(monkeypatch):
 
     client = FakeClient()
     try:
-        assert process_pending_notifications(client=client)["failed"] == 1
-        with local_sessions() as session:
-            row = session.get(TelegramNotificationORM, decision_id)
-            assert row.status == "PENDING"
-            assert row.attempts == 1
-            assert row.last_error == "Telegram HTTP 503"
-        client.fail = False
-        assert process_pending_notifications(client=client)["sent"] == 1
         assert process_pending_notifications(client=client)["sent"] == 0
-        assert len(client.messages) == 2
-        assert "Powiadomienie testowe" in client.messages[1]
-        assert "monitor_test" in client.messages[1]
-        assert "&lt;70000.00&gt; &amp; wolumen" in client.messages[1]
+        assert client.messages == []
         with local_sessions() as session:
             row = session.get(TelegramNotificationORM, decision_id)
-            assert row.status == "SENT"
-            assert row.sent_at is not None
-            assert row.attempts == 2
+            assert row is None
     finally:
         transaction.rollback()
         connection.close()

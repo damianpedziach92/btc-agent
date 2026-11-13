@@ -10,7 +10,7 @@ from database.base import Base
 class TelegramNotificationORM(Base):
     __tablename__ = "telegram_notifications"
     __table_args__ = (
-        CheckConstraint("status IN ('PENDING', 'SENT')", name="ck_telegram_notification_status"),
+        CheckConstraint("status IN ('PENDING', 'SENT', 'DISABLED')", name="ck_telegram_notification_status"),
         CheckConstraint("attempts >= 0", name="ck_telegram_notification_attempts"),
         Index("ix_telegram_notifications_pending", "created_at", postgresql_where=text("status = 'PENDING'")),
     )

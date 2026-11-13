@@ -90,6 +90,7 @@ class AgentMemoryRepository:
         decision: AgentDecision,
         observed: list[ActiveMonitor],
         now: datetime | None = None,
+        analysis_trace: dict | None = None,
     ) -> bool:
         """Persist one decision and all monitor changes in the caller's transaction."""
         now = now or _utc_now()
@@ -153,6 +154,8 @@ class AgentMemoryRepository:
             model=model,
             open_proposal=decision.open_proposal.model_dump(mode="json") if decision.open_proposal else None,
             position_actions=[item.model_dump(mode="json") for item in decision.position_actions],
+            pending_order_actions=[item.model_dump(mode="json") for item in decision.pending_order_actions],
+            analysis_trace=analysis_trace,
             paper_status="PENDING",
         ))
         for item in decision.to_monitor:

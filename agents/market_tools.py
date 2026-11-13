@@ -1,6 +1,6 @@
 import json
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Callable
 
 import httpx
@@ -9,7 +9,9 @@ from database.connection import SessionLocal
 from models.market import Instrument, Timeframe
 from repositories.candle_repository import CandleRepository
 from services.indicators import calculate_indicator_history, MA_PERIODS
+from services.market_structure import calculate_market_structure
 from services.paper_trading import PaperTradingService
+from models.paper import MIN_NET_RISK_REWARD, PaperSide, calculate_risk_reward
 
 
 KRAKEN_TICKER_URL = "https://api.kraken.com/0/public/Ticker"
@@ -18,6 +20,18 @@ TIMEFRAMES = [timeframe.value for timeframe in Timeframe]
 MAX_HISTORY = 50
 
 TOOL_DEFINITIONS = [
+    {
+        "type": "function", "name": "get_risk_reward",
+        "description": "Read-only net R:R preflight for executable CFD20 entry, SL and TP prices. Prices already include CFD side; quantity is 1 BTC and fees are zero.",
+        "strict": True,
+        "parameters": {"type": "object", "properties": {
+            "side": {"type": "string", "enum": ["LONG", "SHORT"]},
+            "entry_execution_price": {"type": "string"},
+            "stop_execution_price": {"type": "string"},
+            "target_execution_price": {"type": "string"},
+        }, "required": ["side", "entry_execution_price", "stop_execution_price", "target_execution_price"],
+        "additionalProperties": False},
+    },
     {
         "type": "function",
         "name": "get_paper_account",
@@ -49,7 +63,7 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "name": "get_indicators",
-        "description": "Get the last N indicator readings (MA50/100/200 and 20-period Bollinger bands) for closed candles in chronological order. Earlier candles warm up moving averages. Null means insufficient consecutive candles. Start with 10-20 readings; maximum 50.",
+        "description": "Get the last N indicator readings (MA50/100/200 and Bollinger bands), plus latest Wilder ATR14, previous-20-candle price channel and recent swing levels. All use closed candles. Null means insufficient consecutive candles. Start with 10-20 readings; maximum 50.",
         "strict": True,
         "parameters": {
             "type": "object",
@@ -130,6 +144,7 @@ class MarketTools:
             "instrument": instrument.value,
             "timeframe": timeframe.value,
             "count": len(history),
+            "market_structure": calculate_market_structure(source),
             "indicators": [
                 snapshot.model_dump(mode="json", exclude={"instrument", "timeframe"})
                 for snapshot in history
@@ -162,7 +177,22 @@ class MarketTools:
 
     def call(self, name: str, arguments: str) -> str:
         params = json.loads(arguments)
-        if name == "get_paper_account":
+        if name == "get_risk_reward":
+            side = PaperSide(params["side"])
+            try:
+                entry = Decimal(params["entry_execution_price"])
+                stop = Decimal(params["stop_execution_price"])
+                target = Decimal(params["target_execution_price"])
+            except InvalidOperation as exc:
+                raise ValueError("Risk/reward prices must be decimal strings") from exc
+            values = calculate_risk_reward(side, entry, stop, target, Decimal("1"), Decimal("0"), Decimal("0"))
+            result = {"execution_model": "CFD_FIXED_20_USD", "quantity_btc": "1",
+                      "risk_net_usd": str(values["risk_net_usd"]),
+                      "reward_net_usd": str(values["reward_net_usd"]),
+                      "rr_ratio": str(values["rr_ratio"]) if values["rr_ratio"] is not None else None,
+                      "min_rr": str(MIN_NET_RISK_REWARD),
+                      "passes": values["rr_ratio"] is not None and values["rr_ratio"] >= MIN_NET_RISK_REWARD}
+        elif name == "get_paper_account":
             result = self.get_paper_account()
         elif name == "get_open_positions":
             result = self.get_open_positions()

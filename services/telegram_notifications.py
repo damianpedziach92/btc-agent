@@ -1,4 +1,7 @@
-"""Durable, read-only Telegram summaries for completed market analyses."""
+"""Telegram transport and retired decision/order notification readers.
+
+Only services.position_notifications may send production alerts.
+"""
 
 import json
 import logging
@@ -19,7 +22,9 @@ from database.connection import SessionLocal
 from database.models.agent_decision import AgentDecisionORM
 from database.models.agent_monitor_item import AgentMonitorItemORM
 from database.models.telegram_notification import TelegramNotificationORM
+from database.models.paper import PaperOrderEventORM, PaperPendingOrderORM
 from services.paper_trading import PaperTradingService, iso_utc
+from services.pending_orders import PendingOrderManager
 
 
 logger = logging.getLogger(__name__)
@@ -115,6 +120,7 @@ def format_decision_notification(
     decision: AgentDecisionORM, account: dict, positions: list[dict],
     monitors: list[AgentMonitorItemORM] | None = None,
     closed_positions: list[dict] | None = None,
+    pending_orders: list[dict] | None = None,
 ) -> str:
     lines = [
         f"BTC/USD | <b>Decyzja:</b> {_safe(decision.decision)} | {iso_utc(decision.created_at)}",
@@ -157,6 +163,9 @@ def format_decision_notification(
             f"<b>Margin:</b> {_usd(account['reserved_margin'])} | zrealizowany PnL {_usd(account['realized_pnl'])}",
             f"<b>Opłaty:</b> {_usd(account['fees_paid'])} | wycena {_safe(account.get('pnl_quality', 'UNCONFIGURED'))}",
         ])
+        rates = account.get("fee_rates") or {}
+        if rates.get("execution_model") == "CFD_FIXED_20_USD":
+            lines.append("<b>Model:</b> CFD20 | spread $20/BTC | fee 0 | simulation only")
         if account.get("stale_data"):
             lines.append("<b>Uwaga:</b> ostatnia świeca 1m jest nieaktualna")
 
@@ -171,6 +180,14 @@ def format_decision_notification(
             f"  <b>Powód:</b> {_safe(position.get('entry_reason'), 90, prices=True)}",
         ])
     if not positions:
+        lines.append("Brak")
+    pending_orders = pending_orders or []
+    lines.append("")
+    lines.append(f"<b>Zlecenia oczekujące ({len(pending_orders)}):</b>")
+    for order in pending_orders:
+        lines.append(f"• <b>{_safe(order['order_type'])} {_safe(order['id'][:8])}</b> | "
+                     f"poziom {_price(order['entry_level_usd'])} | ważne do {_safe(order['expires_at'], 30)}")
+    if not pending_orders:
         lines.append("Brak")
     closed_positions = closed_positions or []
     if closed_positions:
@@ -195,7 +212,8 @@ def format_decision_notification(
 
 
 def enqueue_decision_notification(session, decision_id: UUID, now: datetime | None = None) -> bool:
-    """Queue only decisions created while Telegram is configured."""
+    """Legacy decision alerts are disabled; position events own Telegram."""
+    return False
     if TelegramConfig.from_env() is None:
         return False
     session.execute(insert(TelegramNotificationORM).values(
@@ -207,6 +225,7 @@ def enqueue_decision_notification(session, decision_id: UUID, now: datetime | No
 
 
 def process_pending_notifications(limit: int = 3, client: TelegramBotClient | None = None) -> dict:
+    return {"sent": 0, "failed": 0, "pending": 0, "disabled": True}
     config = TelegramConfig.from_env()
     if config is None:
         return {"sent": 0, "failed": 0, "pending": 0, "disabled": True}
@@ -245,6 +264,7 @@ def process_pending_notifications(limit: int = 3, client: TelegramBotClient | No
             message = format_decision_notification(
                 decision, paper.account_snapshot(), paper.open_positions_snapshot(),
                 monitors, closed_positions,
+                PendingOrderManager(session, paper).snapshot(),
             )
             row.attempts += 1
             try:
@@ -259,3 +279,44 @@ def process_pending_notifications(limit: int = 3, client: TelegramBotClient | No
                 row.last_error = None
                 sent += 1
     return {"sent": sent, "failed": failed, "pending": pending, "disabled": False}
+
+
+def process_pending_order_notifications(limit: int = 10, client: TelegramBotClient | None = None) -> dict:
+    return {"sent": 0, "failed": 0, "disabled": True}
+    config = TelegramConfig.from_env()
+    if config is None:
+        return {"sent": 0, "failed": 0, "disabled": True}
+    client = client or TelegramBotClient(config)
+    with SessionLocal() as session:
+        ids = list(session.scalars(select(PaperOrderEventORM.id).where(
+            PaperOrderEventORM.notification_status == "PENDING",
+        ).order_by(PaperOrderEventORM.event_time, PaperOrderEventORM.id).limit(limit)))
+    sent = failed = 0
+    for event_id in ids:
+        with SessionLocal.begin() as session:
+            event = session.scalar(select(PaperOrderEventORM).where(
+                PaperOrderEventORM.id == event_id,
+                PaperOrderEventORM.notification_status == "PENDING",
+            ).with_for_update(skip_locked=True))
+            if event is None:
+                continue
+            order = session.get(PaperPendingOrderORM, event.order_id)
+            account = PaperTradingService(session).account_snapshot()
+            message = (f"BTC/USD | <b>Zlecenie PAPER {escape(event.type)}</b> | {iso_utc(event.event_time)}\n"
+                       f"<b>ID:</b> {escape(str(order.id))} | <b>Typ:</b> {escape(order.order_type)}\n"
+                       f"<b>Poziom:</b> {_price(order.entry_level_usd)} | <b>Pozycja:</b> "
+                       f"{escape(str(order.position_id)) if order.position_id else 'brak'}\n"
+                       f"<b>Powód:</b> {_safe(event.payload.get('reason') or order.reason, 180, prices=True)}\n"
+                       f"<b>Model:</b> CFD20 | spread $20/BTC | fee 0 | simulation only\n"
+                       f"<b>Equity:</b> {_usd(account['equity_estimate']) if account.get('equity_estimate') else 'brak'}")
+            event.notification_attempts += 1
+            try:
+                client.send_message(message)
+            except TelegramDeliveryError as exc:
+                failed += 1
+                logger.warning("Telegram pending order event %s delivery failed: %s", event.id, exc)
+            else:
+                event.notification_status = "SENT"
+                event.notified_at = datetime.now(timezone.utc)
+                sent += 1
+    return {"sent": sent, "failed": failed, "disabled": False}

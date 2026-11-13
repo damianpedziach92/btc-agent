@@ -7,6 +7,7 @@ class Instrument(str, Enum):
 
 class Timeframe(str, Enum):
     ONE_MINUTE = "1m"
+    FIVE_MINUTES = "5m"
     FIFTEEN_MINUTES = "15m"
     ONE_HOUR = "1h"
     FOUR_HOURS = "4h"
@@ -16,6 +17,7 @@ class Timeframe(str, Enum):
     def minutes(self) -> int:
         return {
             Timeframe.ONE_MINUTE: 1,
+            Timeframe.FIVE_MINUTES: 5,
             Timeframe.FIFTEEN_MINUTES: 15,
             Timeframe.ONE_HOUR: 60,
             Timeframe.FOUR_HOURS: 240,

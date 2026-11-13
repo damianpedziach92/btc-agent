@@ -71,7 +71,8 @@ class MarketAgentTests(unittest.TestCase):
     def test_agent_passes_tool_result_back_to_model(self):
         responses = FakeResponses()
         client = SimpleNamespace(responses=responses)
-        report = MarketAnalyst(client, FakeTools(), "test-model").analyze()
+        analyst = MarketAnalyst(client, FakeTools(), "test-model")
+        report = analyst.analyze()
         self.assertEqual(report.decision, Decision.WAIT)
         self.assertEqual(report.text, "Brak potwierdzenia.")
         self.assertEqual(responses.requests[0]["text"]["format"]["schema"], AGENT_DECISION_SCHEMA)
@@ -82,8 +83,10 @@ class MarketAgentTests(unittest.TestCase):
             "output": '{"price":"74000"}',
         })
         self.assertEqual({tool["name"] for tool in TOOL_DEFINITIONS}, {
-            "get_price", "get_indicators", "get_candles", "get_paper_account", "get_open_positions"
+            "get_price", "get_indicators", "get_candles", "get_paper_account", "get_open_positions", "get_risk_reward"
         })
+        self.assertEqual(analyst.tool_trace[0]["name"], "get_price")
+        self.assertEqual(analyst.tool_trace[0]["result"]["price"], "74000")
 
     def test_ticker_and_parameter_validation(self):
         response = SimpleNamespace(
@@ -157,7 +160,7 @@ class MarketAgentTests(unittest.TestCase):
             result = AgentDecision.model_validate(payload)
             self.assertEqual(result.decision.value, value)
         self.assertEqual({tool["name"] for tool in TOOL_DEFINITIONS}, {
-            "get_price", "get_indicators", "get_candles", "get_paper_account", "get_open_positions"
+            "get_price", "get_indicators", "get_candles", "get_paper_account", "get_open_positions", "get_risk_reward"
         })
 
     def test_invalid_contract_is_rejected(self):
@@ -202,6 +205,29 @@ class MarketAgentTests(unittest.TestCase):
             client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: response))
             with self.subTest(response=response), self.assertRaises((RuntimeError, ValidationError)):
                 MarketAnalyst(client, FakeTools(), "test-model").analyze()
+
+    def test_invalid_structured_answer_gets_one_tool_free_repair(self):
+        class RepairResponses:
+            def __init__(self):
+                self.requests = []
+
+            def create(self, **kwargs):
+                self.requests.append(kwargs)
+                if len(self.requests) == 1:
+                    return SimpleNamespace(output=[], output_text=json.dumps({
+                        "decision": "BUY", "open_proposal": None,
+                        "position_actions": [], "pending_order_actions": [],
+                        "to_monitor": [], "text": "Niespójna decyzja"}))
+                return SimpleNamespace(output=[], output_text=DECISION_JSON)
+
+        responses = RepairResponses()
+        analyst = MarketAnalyst(SimpleNamespace(responses=responses), FakeTools(), "test-model")
+        result = analyst.analyze()
+        self.assertEqual(result.decision, Decision.WAIT)
+        self.assertEqual(analyst.validation_repair_count, 1)
+        self.assertEqual(len(responses.requests), 2)
+        self.assertEqual(responses.requests[1]["tool_choice"], "none")
+        self.assertIn("open proposal", responses.requests[1]["input"][-1]["content"])
 
 
 if __name__ == "__main__":

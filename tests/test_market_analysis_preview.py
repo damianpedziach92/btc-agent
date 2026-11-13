@@ -17,10 +17,11 @@ class MarketAnalysisPreviewTests(unittest.TestCase):
             patch("services.market_analysis.CandleRepository") as candles,
             patch("services.market_analysis.AgentMemoryRepository") as memory,
             patch("services.market_analysis.PaperTradingService") as paper,
+            patch("services.market_analysis.MarketTools") as tools,
+            patch("services.market_analysis.build_market_context") as market_context,
             patch("services.market_analysis.OpenAI") as openai,
             patch("services.market_analysis.MarketAnalyst") as analyst,
-            patch("services.market_analysis.enqueue_decision_notification") as enqueue,
-            patch("services.market_analysis.process_pending_notifications") as notifications,
+            patch("services.market_analysis.process_pending_decisions") as paper_commands,
         ):
             candles.return_value.get_latest.return_value = [SimpleNamespace(
                 timestamp=datetime(2020, 1, 1, tzinfo=timezone.utc)
@@ -31,6 +32,8 @@ class MarketAnalysisPreviewTests(unittest.TestCase):
             paper.return_value.account_snapshot.return_value = {"status": "UNSEEDED"}
             paper.return_value.open_positions_snapshot.return_value = []
             paper.return_value.recent_events.return_value = []
+            tools.return_value.get_price.return_value = {"price": "74000", "retrieved_at": datetime.now(timezone.utc).isoformat()}
+            market_context.return_value = {"sha256": "test"}
 
             result = run_market_analysis(preview=True)
 
@@ -38,11 +41,11 @@ class MarketAnalysisPreviewTests(unittest.TestCase):
             memory.return_value.exists.assert_not_called()
             memory.return_value.save.assert_not_called()
             sessions.begin.assert_not_called()
-            enqueue.assert_not_called()
-            notifications.assert_not_called()
+            paper_commands.assert_not_called()
             openai.assert_called_once()
+            self.assertEqual(candles.return_value.get_latest.call_args.args[1].value, "5m")
 
-    def test_saved_decision_queues_notification_after_database_save(self):
+    def test_saved_decision_runs_paper_without_decision_telegram(self):
         decision_id = uuid4()
         with (
             patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}),
@@ -50,11 +53,11 @@ class MarketAnalysisPreviewTests(unittest.TestCase):
             patch("services.market_analysis.CandleRepository") as candles,
             patch("services.market_analysis.AgentMemoryRepository") as memory,
             patch("services.market_analysis.PaperTradingService") as paper,
+            patch("services.market_analysis.MarketTools") as tools,
+            patch("services.market_analysis.build_market_context") as market_context,
             patch("services.market_analysis.OpenAI"),
             patch("services.market_analysis.MarketAnalyst") as analyst,
-            patch("services.market_analysis.enqueue_decision_notification") as enqueue,
             patch("services.market_analysis.process_pending_decisions") as paper_commands,
-            patch("services.market_analysis.process_pending_notifications") as notifications,
         ):
             candles.return_value.get_latest.return_value = [SimpleNamespace(
                 timestamp=datetime(2020, 1, 1, tzinfo=timezone.utc)
@@ -67,13 +70,13 @@ class MarketAnalysisPreviewTests(unittest.TestCase):
             paper.return_value.account_snapshot.return_value = {"status": "ACTIVE"}
             paper.return_value.open_positions_snapshot.return_value = []
             paper.return_value.recent_events.return_value = []
+            tools.return_value.get_price.return_value = {"price": "74000", "retrieved_at": datetime.now(timezone.utc).isoformat()}
+            market_context.return_value = {"sha256": "test"}
             sessions.begin.return_value.__enter__.return_value.scalar.return_value = decision_id
 
             self.assertEqual(run_market_analysis(force=True), expected)
-            enqueue.assert_called_once()
-            self.assertEqual(enqueue.call_args.args[1], decision_id)
             paper_commands.assert_called_once()
-            notifications.assert_called_once()
+            self.assertEqual(memory.return_value.save.call_args.kwargs["analysis_trace"]["trigger_timeframe"], "5m")
 
 
 if __name__ == "__main__":

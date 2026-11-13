@@ -10,6 +10,7 @@ from repositories.candle_repository import CandleRepository
 
 
 AGGREGATE_TIMEFRAMES = (
+    Timeframe.FIVE_MINUTES,
     Timeframe.FIFTEEN_MINUTES,
     Timeframe.ONE_HOUR,
     Timeframe.FOUR_HOURS,

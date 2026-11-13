@@ -37,7 +37,13 @@ class AgentMemoryPostgresTests(unittest.TestCase):
                     first_candle = now - timedelta(days=100)
                     expiry = now + timedelta(hours=1)
                     item = {"id": key, "text": "Obserwuj wybicie", "status": "ACTIVE", "expires_at": expiry}
-                    self.assertTrue(repo.save(instrument, first_candle, "test-model", decision([item]), initial, now))
+                    trace = {"tool_calls": [{"name": "get_price", "status": "OK"}]}
+                    self.assertTrue(repo.save(instrument, first_candle, "test-model", decision([item]), initial, now,
+                                              analysis_trace=trace))
+                    self.assertEqual(session.scalar(select(AgentDecisionORM.analysis_trace).where(
+                        AgentDecisionORM.instrument == instrument.value,
+                        AgentDecisionORM.candle_timestamp == first_candle,
+                    )), trace)
                     self.assertFalse(repo.save(instrument, first_candle, "test-model", decision([]), initial, now))
                     active = repo.load_active(instrument, now)
                     self.assertEqual(len([row for row in active if row.id == key]), 1)

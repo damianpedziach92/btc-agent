@@ -1,74 +1,76 @@
-# BTC/USD market data and analyst
+# BTC agent — Kraken data, PAPER CFD20
 
-The collector fetches closed 1-minute Kraken candles every minute. Complete UTC windows produce 15m, 1h, 4h and 1d candles. Indicator snapshots contain SMA50, SMA100, SMA200 and Bollinger Bands (20 periods, 2 population standard deviations) when enough consecutive candles exist.
+The collector imports closed Kraken BTC/USD 1m candles each minute and aggregates 5m, 15m, 1h, 4h and 1d. MA50/100/200, Bollinger Bands, ATR and market structure are available to the market analyst. The analyst runs every 5 minutes after a completed M5; the read-only decision reviewer checks completed two-hour UTC windows. No broker orders, private exchange endpoints or live trading keys are used.
 
-The market analyst runs at `:00:20`, `:15:20`, `:30:20` and `:45:20` UTC, after the collector at second 5. It has five read-only tools:
+## PAPER CFD20
 
-| Tool | Data |
-| --- | --- |
-| `get_price` | Latest Kraken spot trade, best bid/ask, spread per BTC and retrieval time |
-| `get_indicators` | Up to 50 recent indicator readings for a timeframe, with earlier candles used for warm-up |
-| `get_candles` | Up to 50 recent closed candles for a timeframe |
-| `get_paper_account` | USD paper balance, equity estimate, margin, costs and limits |
-| `get_open_positions` | All open paper positions with entry reasons, protection and costs |
+**CFD20 | spread $20/BTC | fee 0 | simulation only.** This is a user-requested assumption, not an observed Plus500 or Kraken CFD quote. Kraken remains the reference market. The reference midpoint is `(best bid + best ask) / 2`; when the two-sided quote is unavailable, the system labels the last trade as `last_trade_mid_assumption`. The simulated executable BUY price is `mid + $10/BTC`; SELL is `mid - $10/BTC`. There is no separate commission, financing, margin opening charge or slippage. Full round-trip spread cost at unchanged midpoint is `$20 × BTC quantity`: 0.01 BTC costs $0.20. Leverage remains 1×.
 
-It saves one structured `BUY`, `SELL` or `WAIT` decision per closed 15m candle in `agent_decisions`, including an optional `open_proposal` and `position_actions`. Active observations remain in `agent_monitor_items` as untrusted hypotheses. The agent receives an account and full open-position snapshot before tool use. The orchestrator validates proposals against current state and can open or close **simulated** positions. No real trading tools, private Kraken endpoints or trading keys are used. `market_analyses` remains in place for historical text reports.
+The account is versioned in `paper_fee_profiles`. New positions require the active `CFD_FIXED_20_USD` profile. Older positions keep their original `fee_snapshot`, use their historical fee rules on close, and remain in the append-only ledger. The seed command without a profile flag only ensures that the account exists; legacy profile flags are rejected once CFD20 is active. Neither migration nor activation resets cash, positions, decisions or history.
 
-The analyst is an educational, aggressive scalping simulation. It may propose a direction from a current 1m setup without waiting for every higher timeframe to agree. A triggered observation leads to `BUY` or `SELL` when its signal is still valid; a reversed or stale setup is invalidated. It can ask to `HOLD` or `CLOSE` an existing position. The risk engine determines size and may reject a proposal; each rejection is visible to the next analysis.
+SL and TP levels are **executable closing-side CFD prices**. LONG closes at simulated bid (`mid - 10`), SHORT at simulated ask (`mid + 10`). Closed M1 high/low determines whether a barrier was touched. Both barriers in one minute mean SL first. A worse opening price after an SL gap is used and marked `GAP_FILL_ASSUMPTION`; ordinary touch fills at the exact barrier. Historical legacy positions keep their legacy barrier interpretation. OHLC cannot reveal intrabar order or real liquidity, so fills and PnL are estimates.
 
-The tools can show price action, momentum and volatility from market data. They do not measure news or social sentiment. Each analysis can make at most 10 tool calls, each history call returns at most 50 points, and the combined tool responses are limited to 50,000 characters to bound model context size.
+Risk sizing uses the same executable exit convention as post-entry equity checks. The configured risk and margin limits, fresh M1 feed, structural M15 stop and opposing-position prohibition remain in force. `.env.example` documents the limits. `PAPER_MAX_TOTAL_MARGIN=0.90` and `PAPER_MIN_FREE_MARGIN=0.05` permit substantial exposure even at 1×.
+Every new CFD20 entry requires executable net reward/risk of at least **1.5**, checked again at actual fill. SL and TP are required. Rejections include `INSUFFICIENT_RISK_REWARD` diagnostics; existing positions are unchanged. `PAPER_EXPERIMENTAL_MIN_RR_AFTER_COSTS` can tighten the threshold further; `PAPER_EXPERIMENTAL_MAX_CHASE_ATR` is optional. Both default to zero.
 
-## Setup
+## Pending orders
+
+Every 5-minute analysis can issue structured `pending_order_actions`: CREATE, AMEND, CANCEL or HOLD. The minute collector evaluates saved orders on **complete M1** after processing existing positions' SL/TP. The agent is not called each minute. `to_monitor` is informational and cannot execute a trade.
+
+| Order | Executable CFD trigger | Meaning |
+| --- | --- | --- |
+| BUY_LIMIT | ask ≤ level | LONG on pullback |
+| BUY_STOP | ask ≥ level | LONG on breakout |
+| SELL_LIMIT | bid ≥ level | SHORT on rebound |
+| SELL_STOP | bid ≤ level | SHORT on breakdown |
+
+Orders cannot fill at CREATE. The first eligible candle must start at or after the order's creation or last amendment minute boundary. LIMIT fills at its level or a better candle open. STOP fills at its trigger or a worse candle open after a gap. Order size is computed at fill using the same PAPER risk engine. Up to three active orders are allowed, with one per scenario and no opposing pending sides. CREATE does not reserve cash; potential exposure is checked, and all limits are checked again at fill. Default maximum TTL is 60 minutes. An expired order cannot fill even if a later candle crosses its level. Processing is idempotent by execution key. A data gap is never inferred as a trigger. A fill starts SL/TP protection from the next complete M1, because the intrabar path is unknown.
+An optional machine-checkable `invalidating_condition` can cancel the order when a closed candle crosses a specified level; the condition is evaluated before a trigger in the same bar. Free-form text never cancels or fills an order.
+
+The agent receives active order IDs and revisions. AMEND/CANCEL/HOLD require the exact ID and revision; a filled order cannot be amended. Order events are stored in `paper_order_events`. Telegram sends one OPENED alert when an order fills and no alert for CREATE, AMEND, CANCEL or EXPIRE. `.venv/bin/python -m scripts.show_paper_account` prints active and recent orders, cash, equity, positions and execution model.
+
+## Market agent and reviewer
+
+The analyst considers H1/M15 context and chooses either `INTRADAY_M15` or `SCALP_M5`, with M1 timing. SCALP_M5 supports `M5_PULLBACK_RETEST`, `M5_RANGE_REJECTION` and `M5_BREAKOUT_RETEST`; every analysis stores six closed-candle candidates and rejection counts. Read-only tools return latest price, candles, indicators, PAPER account, positions and a net R:R preflight calculator. Decisions, tool trace, proposals, position actions and pending order actions are saved to `agent_decisions`. For new decisions, `candle_timestamp` means the start of the triggering closed M5; `analysis_trace.trigger_timeframe`, `trigger_candle_end`, input size and token usage record the new cadence. Older decisions keep their M15 interpretation. The existing unique `(instrument, candle_timestamp)` key prevents a duplicate when an old M15 and new M5 start share a timestamp. The reviewer evaluates every action with historical closed candles, execution results and costs. Large contexts are compacted per action and processed in bounded batches; saved metadata includes `batch_count`, `covered_action_ids` and removed redundant fields. A failed batch does not save a partial review.
+
+Telegram uses only the transactional `paper_position_notifications` outbox for actual OPENED and CLOSED events, including automatic TP/SL between analyses. Messages contain the saved execution price, net PnL on close, short position ID and source. No WAIT, decision summary, pending order status or reviewer report is sent. The migration marks older queued reports `DISABLED` without deleting them.
+
+```bash
+.venv/bin/python -m scripts.run_market_agent --check-tools
+.venv/bin/python -m scripts.run_market_agent --preview
+.venv/bin/python -m scripts.run_market_agent --force
+.venv/bin/python -m scripts.show_scalp_diagnostics --since 2026-11-12T15:00:00Z
+.venv/bin/python -m scripts.run_decision_review --preview
+.venv/bin/python -m scripts.run_decision_review --window-end 2026-11-11T16:00:00Z
+.venv/bin/python -m scripts.run_decision_review --backfill-from 2026-11-10T00:00:00Z --backfill-to 2026-11-11T16:00:00Z
+```
+
+`--preview` calls the model but saves no decision, order, position, review or notification. Backfill is limited to seven days per command and skips already saved windows. An API failure stops the run, leaving the failed window for retry. Historic model outputs are educational evidence, not a statistical proof of strategy performance.
+
+## Read-only replay
+
+The replay compares saved agent proposals with deterministic H1/M15 rules and all three SCALP_M5 families. It divides the selected UTC period into in-sample and out-of-sample halves, uses only candles closed at each signal, models M5 LIMIT orders on later M1 bars, and applies CFD20 execution, risk sizing and protective barrier functions. The CSV contains every simulated trade; JSON contains metrics and the detailed records; Markdown contains a compact comparison.
+
+```bash
+.venv/bin/python -m scripts.replay_paper --start 2026-10-01T00:00:00Z --end 2026-11-01T00:00:00Z --output-prefix reports/cfd20-replay
+```
+
+The replay makes no LLM calls and never writes to the PAPER account. OHLC does not show intrabar execution sequence or actual CFD quotes. Treat the metrics as deterministic experiments, not forecasts. Original ledger history stays unchanged; any CFD20 result for legacy positions is a separate counterfactual simulation.
+The agent baseline replays saved entry proposals and CLOSE actions; under CFD20 a protective barrier can close the simulated position before the agent's later CLOSE. It therefore need not match the original 12-position ledger.
+
+For the 12 previously closed positions, [a separate counterfactual report](reports/btc-paper-cfd20-counterfactual-2026-11-12.md) shows the cost-only change at the original exit times and a second run of CFD-side TP/SL. Rebuild it read-only with `.venv/bin/python -m scripts.cfd20_counterfactual --output-prefix reports/btc-paper-cfd20-counterfactual-2026-11-12`. The original report and ledger are untouched.
+
+## Setup and deployment
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/alembic upgrade head
-.venv/bin/python -m scripts.seed_paper_account --okx-eea-taker-profile
-```
-
-The seed creates a single default account with **1000.00 USD** and never resets its balance on restart. The `--okx-eea-taker-profile` switch applies the requested **0.10% spot taker fee on both entry and exit**. OKX Europe lists this rate for Regular EEA users with an opened X-Perps account; rates for spot-only accounts differ. This is a fixed PAPER assumption, not a live account fee lookup. The current profile applies a **fixed 4 bps PAPER spread** around the midpoint of the current Kraken bid/ask, or around the last trade when no quote is available. Slippage, margin opening fee and four-hour rollover are all **zero**. This is the user-requested simulation, not a claim about live OKX spread or borrowing costs. The market-data source remains Kraken. See the [OKX Europe fee table](https://www.okx.com/en-eu/help/what-are-the-new-trading-fees-for-eea-users) and [Spot Margin borrowing explanation](https://www.okx.com/en-eu/help/eea-spot-margin-faq).
-
-A newly seeded account without a profile is `UNCONFIGURED` and blocks new positions. Re-running the same seed and profile is idempotent; changing profile rates creates a new version and each position keeps its opening fee snapshot. The older `--estimated-demo-profile` remains available for comparisons but installs the former 0.26% simulated trade fee. Re-running it on the active account would switch the active profile back to that demo rate.
-
-For custom simulation rates, pass all six `--trade-entry-fee-rate`, `--trade-exit-fee-rate`, `--margin-opening-fee-rate`, `--rollover-rate-per-4h`, `--slippage-bps`, `--spread-bps` plus `--fee-source` to `scripts.seed_paper_account`. Rates are fractions (`0.02% = 0.0002`); bps use whole basis-point units. No fee value is silently taken from a live Kraken account.
-
-Set `DATABASE_URL` in `.env`. Add `OPENAI_API_KEY` to enable the analyst. `OPENAI_MODEL` is optional; the default is `gpt-6-luna`. Restart the scheduler after changing `.env`:
-
-```bash
+.venv/bin/python -m scripts.seed_paper_account --cfd20
+.venv/bin/python -m scripts.show_paper_account
 systemctl --user restart btc-agent-scheduler.service
 ```
 
-Before adding a key, inspect the data tools without calling the model:
+Set `DATABASE_URL`, `OPENAI_API_KEY` and optional `OPENAI_MODEL` in `.env`; the default model is `gpt-6-luna`. `DECISION_REVIEW_MODEL` can override it for the reviewer. Telegram needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. The position outbox retries failed sends. Do not commit `.env`. The current deployment procedure is in [docs/SCALP_M5_RUNBOOK.md](docs/SCALP_M5_RUNBOOK.md); the original CFD20 activation procedure is in [docs/CFD20_RUNBOOK.md](docs/CFD20_RUNBOOK.md).
 
-```bash
-.venv/bin/python -m scripts.run_market_agent --check-tools
-```
-
-For a manual analysis of the latest 15m candle, use `.venv/bin/python -m scripts.run_market_agent --force`. To test edited instructions on the same candle without saving a decision, use `.venv/bin/python -m scripts.run_market_agent --preview`. The CLI prints JSON. Read saved decisions and historical reports with `.venv/bin/python -m scripts.show_market_analyses`. Restart the scheduler after editing `agents/market_analyst.py` so scheduled runs load the new instructions.
-
-## Telegram notifications
-
-After each **new saved 15m agent decision**, the scheduler can send a Telegram summary with the decision, PAPER execution result, all currently open positions, positions closed since the previous analysis, active monitor observations and the account balance/equity. A `WAIT` decision also produces a message. Section labels use HTML bold and structured prices show two decimal places. A long summary is split into multiple Telegram messages. Notifications are sent after the paper command is processed; if execution is still pending for over two minutes, the message says so. Failed deliveries are retried by the minute collector. A successful delivery is recorded in PostgreSQL, preventing ordinary duplicates after restart. An API timeout or a partial multi-message delivery can still lead to a duplicate on retry. `--preview` and an already saved 15m candle do not queue messages.
-
-1. Create a bot with Telegram's BotFather and send `/start` to that bot from the target chat.
-2. Put `TELEGRAM_BOT_TOKEN` in `.env`, then run `.venv/bin/python -m scripts.telegram_setup --list-chats` to find the `chat_id` without printing the token.
-3. Put `TELEGRAM_CHAT_ID` in `.env`, run `.venv/bin/python -m scripts.telegram_setup --send-test`, then `systemctl --user restart btc-agent-scheduler.service`.
-
-Both variables are required. If either is absent, new decisions are not queued for Telegram; enabling notifications later starts with future decisions, without sending an old backlog. Keep the bot token out of logs and version control. The message uses UTC timestamps. Telegram's [Bot API `sendMessage` and HTML formatting documentation](https://core.telegram.org/bots/api#sendmessage) describes the chat ID, text and formatting fields.
-
-Inspect the paper account and open positions with `.venv/bin/python -m scripts.show_paper_account`. The collector processes completed 1m candles after storage and aggregation; it can close paper positions even when the LLM is unavailable. Saved but unfinished paper commands are retried with idempotency keys after restart. There is no FastAPI server in this repository, so diagnostics use CLI scripts.
-
-## Paper risk and accounting
-
-Risk limits are configurable in `.env` using the names in [`.env.example`](.env.example). Defaults: at most 1% of current equity at risk per new position with an SL, 3% across open positions, 20% equity margin per position, 60% total margin, 20% free margin reserve, five open positions, and **1x maximum leverage**. Opposing BTC/USD positions are rejected. Opening also requires three consecutive fresh closed 1m candles. Missing SL is rejected by default; explicitly enabling it limits allocation to 5% equity and holding time to four hours, with an emergency drawdown check. All positions time out after 24 hours by default. Agent proposals never choose quantity or bypass these limits. A proposed TP must yield at least `PAPER_MIN_TP_NET_PROFIT_USD` (default $0.01) after the simulated entry price, entry trade fee, margin opening fee, exit trade fee at the exact TP and a conservative allowance for every completed four-hour rollover period through the configured maximum hold time. The check uses the final rounded position size and the fee profile snapshot. A gross-positive but net-negative TP is rejected; a missing TP remains allowed. Fee rates are included in the agent's account snapshot so it can estimate a viable target before proposing one.
-
-`cash_balance` is the initial 1000 USD plus realized gross PnL minus paid entry, exit and holding costs. Margin reservation is recorded as a separate ledger delta, not deducted from cash a second time. `equity_estimate` uses estimated immediate liquidation prices after the configured spread and exit trade fees; entry and holding costs are already in cash. A position's `unrealized_net_estimate` includes its entry and holding costs, estimated exit spread and exit fee. The append-only ledger can reconcile cash and reserved margin; position events record accepted, rejected, fee and close decisions. Amounts use `Decimal`. An extreme gap loss is capped at available paper cash, marks the account `BANKRUPT`, and records the uncovered loss separately.
-
-The `SPOT_MARGIN` model can charge trade fees, margin opening and completed four-hour rollover periods when configured; the active built-in profile charges only trade fees and fixed spread. A LONG uses a USD borrowing basis. A SHORT models borrowed BTC and converts its BTC-denominated margin fee to USD at the entry or a close-to-due 1m mark; a missing near-due mark uses the known entry price as a flagged estimate. This simplified conversion cannot reproduce Kraken's actual margin funding or execution. `PERPETUAL` funding has a separate signed-rate calculator and an importable historical-rate table (`scripts.import_paper_funding_rates`); perpetual position opening is disabled in this MVP until a complete sourced funding profile is available. Positive funding costs LONG and credits SHORT; negative funding reverses the flow. Kraken describes [hourly EEA perpetual funding](https://support.kraken.com/gb/articles/perpetual-contract-specifications-for-clients-in-the-eea).
-
-An agent entry uses a fresh **post-analysis** public ticker and applies half the configured fixed PAPER spread on the adverse side of the Kraken bid/ask midpoint: LONG buys above the midpoint and SHORT sells below it. The current profile applies no extra slippage. When no bid/ask is available, the last trade or historical reference price serves as the midpoint. Protection starts with the first complete 1m candle after entry. A completed candle's high/low detects TP/SL; if both hit, **SL wins**. The PAPER model now assumes an exact fill at the configured TP or SL whenever a closed 1m candle touches it. The exit trade fee is charged on that level; no exit spread or slippage is added to barrier fills. This intentionally idealized assumption also applies across gaps and cannot be verified as a realizable exchange fill from OHLC alone. The collector closes at the next minute run after the triggering candle completes, before the next 15m agent analysis. Other exits (`AGENT`, `TIMEOUT`, `RISK_LIMIT`) use the configured half-spread on the adverse side of a fresh quote midpoint, or a later available 1m open as the reference midpoint. Before executing an agent action, pending candle triggers are checked again so automatic TP/SL has priority. The event records the candle-end signal time separately from the processing time and marks the source `1m_ohlc_barrier_assumption`. Spot OHLC lacks order-book liquidity, spread history, intrabar path and liquidation prices. Reported `ESTIMATED` PnL is not actual net trading PnL. A historical close can be corrected only after verifying its first post-entry barrier candle, using `scripts.correct_paper_barrier_fill`; the original close remains in an append-only audit event and a separate ledger adjustment records the cash difference.
-
-Active observations may live at most 24 hours from creation, and at most 20 may exist at once. Configure these limits with `AGENT_MAX_MONITOR_HOURS` and `AGENT_MAX_MONITOR_ITEMS` if needed. An omitted observation stays active until explicitly closed or expired. Closed keys cannot be reused.
-
-Run tests with `.venv/bin/pip install -r requirements-dev.txt` and `.venv/bin/python -m pytest -q`. PostgreSQL integration tests use `DATABASE_URL`; isolated test transactions are rolled back and the concurrency test deletes its temporary test account.
+For isolated PostgreSQL test runs, use a separate database or schema with its own `DATABASE_URL`, apply Alembic there, then run `.venv/bin/python -m pytest -q`. Integration tests use real transactions; they do not contact a trading API.

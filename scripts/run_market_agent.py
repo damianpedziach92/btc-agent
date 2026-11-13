@@ -12,7 +12,7 @@ from services.market_analysis import run_market_analysis
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the BTC/USD market analyst")
     parser.add_argument("--check-tools", action="store_true", help="Test read-only market tools without an OpenAI key")
-    parser.add_argument("--force", action="store_true", help="Allow an older 15m candle; show the saved report if already analyzed")
+    parser.add_argument("--force", action="store_true", help="Allow an older 5m candle; show the saved report if already analyzed")
     parser.add_argument("--preview", action="store_true", help="Run the current instructions again without saving a report")
     args = parser.parse_args()
 
@@ -22,6 +22,10 @@ def main() -> None:
             ("get_paper_account", {}),
             ("get_open_positions", {}),
             ("get_price", {"instrument": "BTC/USD"}),
+            ("get_risk_reward", {"side": "LONG", "entry_execution_price": "74010",
+                                 "stop_execution_price": "73910", "target_execution_price": "74160"}),
+            ("get_indicators", {"instrument": "BTC/USD", "timeframe": "5m", "limit": 3}),
+            ("get_candles", {"instrument": "BTC/USD", "timeframe": "5m", "limit": 3}),
             ("get_indicators", {"instrument": "BTC/USD", "timeframe": "15m", "limit": 3}),
             ("get_candles", {"instrument": "BTC/USD", "timeframe": "15m", "limit": 3}),
         ):
@@ -52,7 +56,7 @@ def main() -> None:
             "paper_status": latest[0].paper_status,
         }, ensure_ascii=False, indent=2))
     else:
-        print("Brak nowej zamkniętej świecy 15m do analizy")
+        print("Brak nowej zamkniętej świecy 5m do analizy")
 
 
 if __name__ == "__main__":
